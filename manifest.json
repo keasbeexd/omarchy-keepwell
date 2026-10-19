@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "keasbeexd.keepwell",
   "name": "Keepwell",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "author": "Marc Ferro @keasbeexd",
   "license": "MIT",
   "description": "Keep your system well: security, privacy and system care in one place, built on the standard tools Arch already has.",

@@ -8,12 +8,11 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.7.0.** Every check reads your real system and every action
+> **Status: 0.8.0.** Every check reads your real system and every action
 > works: installs, firewall, updates, snapshots, cleanup and the privacy
-> settings through a visible terminal; virus and secrets scans in the
-> background; caches, activity traces and unclaimed app folders by moving
-> them to the Trash; optional scheduled checks that only notify. The
-> developer extras (osv-scanner) come next.
+> settings through a visible terminal; virus, secrets and dependency scans in
+> the background; caches, activity traces and unclaimed app folders by moving
+> them to the Trash; optional scheduled checks that only notify.
 
 ## What it looks like
 
@@ -95,6 +94,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (only when you ask — see Network) |
 | Antivirus | modification times in `/var/lib/clamav`; the newest of Keepwell's scan logs | `systemctl is-enabled/is-active clamav-freshclam`, `systemctl --user is-active keepwell-clamscan`, `crontab -l` |
 | Secrets in your code | the last scan summary (`gitleaks.json`) | `systemctl --user is-active keepwell-gitleaks` |
+| Dependency vulnerabilities | the last scan summary (`osv.json`) | `systemctl --user is-active keepwell-osv` |
 | System updates | the last 1 MiB of `/var/log/pacman.log` | — |
 | Camera & microphone | — | `pw-dump` |
 | Browser telemetry | `~/.config/chromium/Local State`, `~/.config/chromium/Default/Preferences` (three keys); the names (`/proc/<pid>/comm`) of your own processes, to see whether Chromium is running | — |
@@ -120,6 +120,10 @@ when you ask:
 - **Known vulnerabilities** runs `arch-audit`, which downloads Arch's public
   security data from `https://security.archlinux.org` (on **Check now** or
   **Check again** — never at startup or on opening the window).
+- **Dependency vulnerabilities** runs `osv-scanner`, which sends your
+  projects' dependency names and versions to Google's OSV.dev service, only
+  when you press a scan button. Clicking a row opens its advisory on
+  `https://osv.dev/vulnerability/<id>` in your browser.
 - **Arch security tracker ↗**, and clicking a package under Known
   vulnerabilities, open `https://security.archlinux.org/` or that package's
   page (`/package/<name>`, which lists its CVEs) in your browser
@@ -141,6 +145,7 @@ at 0600, written through a fresh temporary file and a rename.
 |---|---|
 | `pending.json` | the terminal Keepwell is waiting on (its Hyprland window address, the check and action), so a shell restarted meanwhile — `omarchy update` does that — still brings you back; removed when the terminal closes, ignored after a day |
 | `audit.json` | the last arch-audit result you asked for: package names, severities, fix versions |
+| `osv.json` | the last dependency scan: for each vulnerable library, the project and lockfile, the package and version, its vulnerability ids, CVEs, severities, one-line summaries and fixed versions |
 | `gitleaks.json` | the last secrets scan: the folder, how many repositories, and for each finding only the repository, file, line, rule name and commit — never the secret |
 | `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files |
 | `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
@@ -170,7 +175,7 @@ script, `bin/keepwell-run`, in three steps:
 
 | Action | Commands |
 |---|---|
-| Install arch-audit, gitleaks, GufW, Flatpak and Flatseal, Disk Usage Analyzer | `omarchy pkg add <package>` |
+| Install arch-audit, gitleaks, osv-scanner, GufW, Flatpak and Flatseal, Disk Usage Analyzer | `omarchy pkg add <package>` |
 | Install ClamAV | `omarchy pkg add clamav`, `sudo freshclam`, `sudo systemctl enable --now clamav-freshclam.service` |
 | Turn on definition updates | `sudo systemctl enable --now clamav-freshclam.service` |
 | Install UFW / Turn on the firewall | `omarchy pkg add ufw` (install only), `sudo ufw default deny incoming`, `sudo ufw default allow outgoing`, `sudo ufw enable` |
@@ -245,6 +250,15 @@ systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
   `gitleaks git --redact --report-format json --report-path - -- <repo>` on
   each in the `keepwell-gitleaks` service. Only locations are kept (see
   `gitleaks.json` above).
+- **Dependency vulnerabilities** works the same way (home folder by
+  default, or **Choose another folder…**), in the `keepwell-osv` service:
+  for each project found it runs
+  `osv-scanner scan source -r --format json <project>`, which reads the
+  project's lockfiles and asks Google's OSV.dev service about those
+  dependency names and versions. Keepwell keeps, per vulnerable library, the
+  worst severity (the group's CVSS score, else the advisory's own rating),
+  the CVEs, a one-line summary and the versions that fix it, and suggests the
+  version that fixes them all. It never changes a project.
 - **Stop scan** runs `systemctl --user stop` on that service.
 - When a scan ends (or is stopped), `keepwell-run notify` reads the result,
   sends one desktop notification that states it ("Downloads: nothing found,
@@ -341,7 +355,7 @@ Delete that folder yourself if you don't want to keep them.
 
 A scan that is running carries on until it ends, even after removal; stop it
 first with **Stop scan**, or with
-`systemctl --user stop keepwell-clamscan.service keepwell-gitleaks.service`.
+`systemctl --user stop keepwell-clamscan.service keepwell-gitleaks.service keepwell-osv.service`.
 
 **If background checks are on, turn them off before removing** (**Turn off**
 at the bottom of the left rail). Otherwise the timer stays and fails harmlessly each time,

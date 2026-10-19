@@ -158,20 +158,26 @@ Scope {
                + " in the background — you'll get a notification when it's done.")
       return
     }
-    if (action.stop === "clamscan" || action.stop === "gitleaks") { startJob(["stop", action.stop], "Scan stopped."); return }
+    if (action.stop === "clamscan" || action.stop === "gitleaks" || action.stop === "osv") { startJob(["stop", action.stop], "Scan stopped."); return }
+    if (action.rescan === "osv" && typeof action.folder === "string") {
+      startJob(["osv", action.folder], "Checking your projects' dependencies in the background — you'll get a notification when it's done.")
+      return
+    }
     if (action.rescan === "leaks" && typeof action.folder === "string") {
       startJob(["leaks", action.folder], "Scanning for secrets in the background — you'll get a notification when it's done.")
       return
     }
-    if (action.pick === "leaks") {
+    if (action.pick === "leaks" || action.pick === "osv") {
       if (picker.running) return
+      pickFor = action.pick
       picking = true
       hide()
       picker.start(python.concat([sourceDir + "/bin/keepwell-run", "pick-folder"]))
       return
     }
     if (typeof action.url === "string"
-        && /^https:\/\/security\.archlinux\.org\/(package\/[A-Za-z0-9@._+-]{1,128})?$/.test(action.url)) {
+        && (/^https:\/\/security\.archlinux\.org\/(package\/[A-Za-z0-9@._+-]{1,128})?$/.test(action.url)
+            || /^https:\/\/osv\.dev\/vulnerability\/[A-Za-z0-9._:-]{1,64}$/.test(action.url))) {
       Quickshell.execDetached(["/usr/bin/uwsm-app", "--", "/usr/bin/xdg-open", action.url])
       hide()
       return
@@ -652,6 +658,7 @@ Scope {
   // Scans run as user services (see keepwell-run); these start and stop
   // them, and the folder picker steps aside like a terminal does.
   property bool picking: false
+  property string pickFor: "leaks"
 
   function startJob(args, started) {
     if (jobber.running) return
@@ -686,7 +693,9 @@ Scope {
       if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
       root.show(true)
       if (d && typeof d.folder === "string" && d.folder.indexOf("/") === 0 && d.folder.length < 4096)
-        root.startJob(["leaks", d.folder], "Scanning for secrets in the background — you'll get a notification when it's done.")
+        root.startJob([root.pickFor, d.folder], root.pickFor === "osv"
+          ? "Checking your projects' dependencies in the background — you'll get a notification when it's done."
+          : "Scanning for secrets in the background — you'll get a notification when it's done.")
       else root.say("No folder chosen.")
     }
   }
@@ -694,7 +703,7 @@ Scope {
   // While a scan runs and the window is open, its state is re-read every
   // 15 seconds so the window shows it ending; nothing polls otherwise.
   readonly property bool scanning: !!(doc && doc.probes && ((doc.probes.antivirus && doc.probes.antivirus.scanning)
-                                     || (doc.probes.tools && doc.probes.tools.leaksScanning)))
+                                     || (doc.probes.tools && (doc.probes.tools.leaksScanning || doc.probes.tools.osvScanning))))
   Timer {
     interval: 15000
     repeat: true

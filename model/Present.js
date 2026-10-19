@@ -73,6 +73,8 @@ var CATALOG = {
     what: "Updates bring security fixes for everything installed. Keepwell only reminds you; it never updates on its own." },
   fw: { id: "fw", title: "Firewall", tool: "UFW",
     what: "The firewall decides which network connections may reach this computer. Blocking incoming and allowing outgoing is the right default for a desktop or laptop." },
+  deps: { id: "deps", title: "Dependency vulnerabilities", tool: "osv-scanner",
+    what: "If you write software, osv-scanner checks the libraries your projects depend on — read from their lockfiles (package-lock.json, Cargo.lock, go.sum, requirements.txt and others) — against the OSV vulnerability database, and shows which have known problems and which version fixes them. It reports only; it never changes your projects." },
   leaks: { id: "leaks", title: "Secrets in your code", tool: "gitleaks",
     what: "If you write code, gitleaks scans a folder of git repositories for passwords and API keys that were committed by accident. Read-only: it reports, it never changes a repo." },
 
@@ -100,7 +102,7 @@ var CATALOG = {
 }
 
 var LAYOUT = [
-  { id: "security", name: "Security", checks: ["audit", "av", "upd", "fw", "leaks"] },
+  { id: "security", name: "Security", checks: ["audit", "av", "upd", "fw", "leaks", "deps"] },
   { id: "privacy", name: "Privacy", checks: ["browser", "netpriv", "apps", "cam", "traces", "perms"] },
   { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk"] }
 ]
@@ -285,6 +287,66 @@ function leaks(tools, now) {
     facts: facts,
     note: f.length ? "Each line is a file and line where something looks like a key or password, and the commit it was added in. If it's real, change that password or key — removing it from the file doesn't remove it from git history." : "",
     actions: [{ label: "Scan again", primary: f.length > 0, rescan: "leaks", folder: last.folder }]
+      .concat(last.folder === "~" ? [choose] : [home, choose]) })
+}
+
+// The higher of two version strings, comparing number runs as numbers
+// ("4.17.21" > "4.17.9"). Good enough to name the version that fixes all.
+function newer(a, b) {
+  var x = String(a).split(/[^0-9A-Za-z]+/), y = String(b).split(/[^0-9A-Za-z]+/)
+  for (var i = 0; i < Math.max(x.length, y.length); i++) {
+    var p = x[i] || "0", q = y[i] || "0"
+    var np = /^\d+$/.test(p), nq = /^\d+$/.test(q)
+    var c = np && nq ? Number(p) - Number(q) : p < q ? -1 : p > q ? 1 : 0
+    if (c !== 0) return c > 0 ? a : b
+  }
+  return a
+}
+
+function deps(tools, now) {
+  var b = CATALOG.deps
+  var network = "Scanning sends your projects' dependency names and versions to Google's OSV.dev service; nothing else leaves this computer."
+  if (!tools.osvScanner) return check(b, { kind: "off", status: "Not set up — optional",
+    meta: "For people who write software", facts: [fact("Installed", "No")], note: network,
+    actions: [install("Install osv-scanner", "install-osv-scanner")] })
+  var last = tools.osv
+  var home = { label: "Scan home folder", primary: !last, rescan: "osv", folder: "~" }
+  var choose = { label: "Choose another folder…", pick: "osv" }
+  if (tools.osvScanning) return check(b, { kind: "info", status: "Scanning in the background…",
+    meta: "You'll get a notification when it's done", facts: last ? [fact("Folder", last.folder === "~" ? "Home folder" : last.folder)] : [],
+    actions: [{ label: "Stop scan", primary: true, stop: "osv" }] })
+  if (!last) return check(b, { kind: "off", status: "Ready to scan",
+    meta: "Reads your projects' lockfiles; changes nothing", facts: [fact("Installed", "Yes")],
+    note: "Keepwell finds your projects (git repositories up to four levels down) and checks each one in the background. " + network,
+    actions: [home, choose] })
+  var f = last.findings || []
+  var fixable = f.filter(function(x) { return x.fixable })
+  var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder),
+               fact("Projects", plural(last.scanned, "scanned", "scanned")
+                 + (last.noLockfiles ? " · " + last.noLockfiles + " without dependency files" : "")
+                 + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
+  for (var i = 0; i < Math.min(f.length, 40); i++) {
+    var x = f[i]
+    var fixes = (x.vulns || []).reduce(function(all, v) { return all.concat(v.fixed || []) }, [])
+    var target = fixes.length ? fixes.reduce(newer) : ""
+    var cves = (x.vulns || []).map(function(v) { return v.cve }).filter(function(c) { return c })
+    var row = fact(x.package + " " + x.version,
+      x.severity + " · " + plural(x.count, "vulnerability", "vulnerabilities")
+        + (cves.length ? " (" + cves.slice(0, 2).join(", ") + (cves.length > 2 ? "…" : "") + ")" : "")
+        + (x.vulns && x.vulns[0] && x.vulns[0].summary ? " — " + x.vulns[0].summary : ""),
+      (x.fixable ? "update to " + target + " or later" : target ? "partly fixed in " + target : "no fix released yet")
+        + " · " + x.repo + "/" + x.file + (x.ecosystem ? " (" + x.ecosystem + ")" : ""))
+    if (x.vulns && x.vulns[0] && /^[A-Za-z0-9._:-]{1,64}$/.test(x.vulns[0].id)) row.url = "https://osv.dev/vulnerability/" + x.vulns[0].id
+    facts.push(row)
+  }
+  return check(b, {
+    kind: fixable.length ? "attn" : f.length ? "info" : "good",
+    status: f.length ? plural(f.length, "dependency has", "dependencies have") + " known vulnerabilities"
+      : last.scanned ? "No known vulnerabilities in your projects' dependencies" : "No projects found in that folder",
+    meta: (fixable.length ? fixable.length + " fixable by updating · " : "") + "scanned " + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects"),
+    facts: facts,
+    note: f.length ? "Each row is a library one of your projects uses, the worst problem it has, and the version that fixes it. Update it in that project (for example npm update, cargo update, go get -u, pip install -U), then scan again. Click a row for the advisory on osv.dev. Keepwell never changes your projects. " + network : network,
+    actions: [{ label: "Scan again", primary: fixable.length > 0, rescan: "osv", folder: last.folder }]
       .concat(last.folder === "~" ? [choose] : [home, choose]) })
 }
 
@@ -601,6 +663,7 @@ function build(doc, now) {
     upd: function() { return updates(p("updates"), now) },
     fw: function() { return firewall(p("firewall")) },
     leaks: function() { return leaks(p("tools"), now) },
+    deps: function() { return deps(p("tools"), now) },
     browser: function() { return browser(p("browser"), p("chromiumPolicy")) },
     netpriv: function() { return networkPrivacy(p("netPrivacy")) },
     apps: function() { return apps(p("apps"), p("netPrivacy")) },
@@ -618,7 +681,7 @@ function build(doc, now) {
     var checks = s.checks.map(function(id) {
       if (!probes) return loading(id)
       var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", leaks: "tools",
-        browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
+        deps: "tools", browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
         clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
