@@ -28,6 +28,15 @@ function ago(at, now) {
   return d === 1 ? "yesterday" : d + " days ago"
 }
 
+// "Mon 19 Oct, 12:05" in local time.
+function stamp(at) {
+  var d = new Date(at * 1000)
+  var pad = function(n) { return (n < 10 ? "0" : "") + n }
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()] + " " + d.getDate() + " "
+    + ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]
+    + ", " + pad(d.getHours()) + ":" + pad(d.getMinutes())
+}
+
 function days(at, now) {
   return typeof at === "number" && isFinite(at) ? Math.floor(Math.max(0, now - at) / 86400) : null
 }
@@ -100,6 +109,31 @@ var LAYOUT = [
 
 // ---------------------------------------------------------------- security
 
+// What each kind of problem arch-audit names means, in plain words.
+var AUDIT_KINDS = {
+  "arbitrary code execution": "crafted input could run code",
+  "arbitrary command execution": "crafted input could run commands",
+  "arbitrary filesystem access": "could reach files it shouldn't",
+  "privilege escalation": "could gain more rights than it should",
+  "denial of service": "crafted input could crash it",
+  "information disclosure": "could leak information",
+  "certificate verification bypass": "could trust a fake certificate",
+  "signature forgery": "could accept a forged signature",
+  "directory traversal": "could reach files outside its folder",
+  "access restriction bypass": "could get past an access check",
+  "authentication bypass": "could get past a login check",
+  "insufficient validation": "doesn't check some input properly",
+  "content spoofing": "could show forged content",
+  "cross-site scripting": "web pages could inject scripts",
+  "unknown": "kind not recorded"
+}
+
+function auditKinds(kinds) {
+  var words = (kinds || []).filter(function(k) { return k !== "unknown" })
+                           .map(function(k) { return AUDIT_KINDS[k] || k })
+  return words.filter(function(w, i) { return words.indexOf(w) === i }).join("; ") || "kind not recorded"
+}
+
 function audit(p, net, now) {
   var b = CATALOG.audit
   var note = "Checking downloads Arch's public security list from security.archlinux.org."
@@ -113,33 +147,34 @@ function audit(p, net, now) {
     meta: "Runs when you ask — it uses the network", note: note,
     actions: [{ label: "Check now", primary: true, run: "network" }] })
 
-  var c = p.counts || {}
-  var serious = (c.Critical || 0) + (c.High || 0)
-  var total = serious + (c.Medium || 0) + (c.Low || 0) + (c.Unknown || 0)
-  var facts = []
-  var bySev = {}
   var pkgs = p.packages || []
-  for (var i = 0; i < pkgs.length; i++) {
-    var s = pkgs[i].severity
-    ;(bySev[s] = bySev[s] || []).push(pkgs[i].name + (pkgs[i].fixed ? "" : " (no fix yet)"))
-  }
-  var sevs = ["Critical", "High", "Medium", "Low", "Unknown"]
-  for (var j = 0; j < sevs.length; j++) {
-    if (!c[sevs[j]]) continue
-    var names = bySev[sevs[j]] || []
-    facts.push(fact(sevs[j], names.slice(0, 3).join(", ") + (names.length > 3 ? " +" + (names.length - 3) : "")))
-  }
-  if (total === 0) facts.push(fact("Packages", "No known issues"))
-  facts.push(fact("Auto-refresh", "Off", "Keepwell timer"))
+  var fixable = pkgs.filter(function(x) { return x.fixed })
+  var seriousFix = fixable.filter(function(x) { return x.severity === "Critical" || x.severity === "High" })
+  var seriousOpen = pkgs.filter(function(x) { return !x.fixed && (x.severity === "Critical" || x.severity === "High") })
+  var order = { Critical: 0, High: 1, Medium: 2, Low: 3, Unknown: 4 }
+  var facts = pkgs.slice().sort(function(x, y) {
+    return (x.fixed ? 0 : 1) - (y.fixed ? 0 : 1) || order[x.severity] - order[y.severity]
+  }).map(function(x) {
+    return fact(x.name, x.severity + " · " + auditKinds(x.kinds),
+      (x.fixed ? "fixed in " + x.fixed + " — update" : "no fix released yet") + (x.cves ? " · " + plural(x.cves, "CVE", "CVEs") : ""))
+  })
+  if (pkgs.length === 0) facts.push(fact("Packages", "No known issues"))
 
-  var kind = serious > 0 ? "crit" : (c.Medium || 0) > 0 ? "attn" : "good"
-  var status = serious > 0 ? plural(serious, "high-risk issue", "high-risk issues") + " in installed packages"
-    : total > 0 ? plural(total, "lower-risk issue", "lower-risk issues") + " in installed packages"
+  // Only a released fix is something to act on. An open issue with no fix
+  // is worth knowing about, never worth alarming anyone over.
+  var kind = seriousFix.length ? "crit" : fixable.length ? "attn" : seriousOpen.length ? "info" : "good"
+  var status = fixable.length
+    ? "An update fixes " + plural(fixable.length, "known issue", "known issues")
+    : pkgs.length ? plural(pkgs.length, "package has", "packages have") + " known issues, none fixed yet"
     : "No known issues in installed packages"
-  return check(b, { kind: kind, status: status, note: note,
-    meta: plural(total, "package", "packages") + " flagged · checked just now", facts: facts,
-    actions: total > 0 ? [{ label: "Update system", primary: true, elevated: true, act: "update" }, { label: "Check again", run: "network" }]
-      : [{ label: "Check again", run: "network" }] })
+  var meta = (fixable.length ? fixable.length + " fixable · " : "") + (pkgs.length - fixable.length) + " waiting for a fix · checked " + ago(p.at, now)
+  var whatNow = fixable.length
+    ? "Updating installs the fixed versions. Issues still waiting for a fix need nothing from you yet."
+    : "There is nothing to do right now: no fixed versions have been released. They arrive through normal updates, and Keepwell will flag them when they do. Most of these need someone to send you a specially crafted file or page."
+  return check(b, { kind: kind, status: status, meta: meta, facts: facts,
+    note: whatNow + " " + note,
+    actions: (fixable.length ? [{ label: "Update system", primary: true, elevated: true, act: "update" }] : [])
+      .concat([{ label: "Check again", run: "network" }, { label: "Arch security tracker ↗", url: "https://security.archlinux.org/" }]) })
 }
 
 function antivirus(p, now) {
@@ -150,21 +185,38 @@ function antivirus(p, now) {
     facts: [fact("ClamAV", "Not installed")], actions: [install("Install ClamAV", "install-clamav")] })
   var age = days(p.definitionsAt, now)
   var auto = p.freshclamEnabled === "enabled"
+  var last = p.lastScan
+  var where = function(t) { return t === "home" ? "Home folder" : "Downloads" }
+  var lastText = !last ? "No scans yet"
+    : !last.finished ? where(last.target) + " · " + ago(last.at, now) + " · stopped before the end"
+    : where(last.target) + " · " + ago(last.at, now) + " · " + (last.infected ? plural(last.infected, "infected file", "infected files")
+        : "nothing found") + (typeof last.files === "number" ? " in " + plural(last.files, "file", "files") : "")
   var facts = [
     fact("Definitions", age === null ? "None downloaded yet" : age === 0 ? "Updated today" : plural(age, "day", "days") + " old"),
     fact("Auto-update", auto ? "On" : "Off", "clamav-freshclam"),
-    fact("Scheduled scan", p.scanAt ? "Daily at " + p.scanAt : "None", p.clamtk ? "managed by ClamTK" : ""),
-    fact("Last scan", p.lastScanAt ? ago(p.lastScanAt, now) : "No scans recorded", p.clamtk ? "ClamTK history" : "")
+    fact("Last scan", p.scanning ? "Scanning now…" : lastText, "Keepwell")
   ]
+  var found = last && last.finished && last.infected ? last.found || [] : []
+  for (var i = 0; i < found.length; i++) facts.push(fact(i === 0 ? "Found" : "", found[i]))
   var stale = age === null || age > 7
   var actions = []
-  if (!auto) actions.push({ label: "Turn on auto-update", primary: true, elevated: true, act: "freshclam-on" })
-  if (age !== null) actions.push({ label: "Scan Downloads", primary: auto, elevated: true, act: "scan-downloads" })
-  return check(b, { tool: p.clamtk ? "ClamAV · ClamTK" : "ClamAV",
-    kind: stale ? "attn" : "good",
-    status: age === null ? "No virus definitions yet" : stale ? "Virus definitions are " + age + " days old" : "Definitions are up to date",
-    meta: p.scanAt ? "Scan daily " + p.scanAt + " · managed by ClamTK" : "No scheduled scan",
-    facts: facts, note: honest, actions: actions })
+  if (p.scanning) actions.push({ label: "Stop scan", primary: true, stop: "clamscan" })
+  else if (age !== null) {
+    actions.push({ label: "Scan Downloads", primary: !stale || auto, scan: "downloads" })
+    actions.push({ label: "Scan home folder", scan: "home" })
+  }
+  if (!auto) actions.push({ label: "Turn on auto-update", primary: !p.scanning, elevated: true, act: "freshclam-on" })
+  return check(b, {
+    kind: found.length ? "crit" : stale ? "attn" : "good",
+    status: p.scanning ? "Scanning in the background…"
+      : found.length ? plural(found.length, "infected file", "infected files") + " found"
+      : age === null ? "No virus definitions yet" : stale ? "Virus definitions are " + age + " days old" : "Definitions are up to date",
+    meta: p.scanning ? "You'll get a notification when it's done" : last ? "Last scan " + ago(last.at, now) : "No scans yet",
+    facts: facts,
+    note: found.length
+      ? "Keepwell doesn't delete anything. Check each file: if you don't recognise it, move it to the Trash yourself; if you do, it may be a false alarm."
+      : "Scans run in the background at low priority and skip caches and the Trash. A home-folder scan can take half an hour or more. " + honest,
+    actions: actions })
 }
 
 function updates(p, now) {
@@ -206,14 +258,31 @@ function firewall(p) {
     actions: [gui, { label: "Turn off…", elevated: true, act: "ufw-off" }] })
 }
 
-function leaks(tools) {
+function leaks(tools, now) {
   var b = CATALOG.leaks
   if (!tools.gitleaks) return check(b, { kind: "off", status: "Not set up — optional",
     meta: "Finds keys and passwords committed to git", facts: [fact("Installed", "No")],
     actions: [install("Install gitleaks", "install-gitleaks")] })
-  return check(b, { kind: "off", status: "Ready — choose a folder to scan",
-    meta: "Read-only report", facts: [fact("Installed", "Yes"), fact("Folder", "Not chosen")],
-    actions: [{ label: "Choose a folder…", primary: true }] })
+  var last = tools.leaks
+  var choose = { label: last ? "Choose another folder…" : "Choose a folder…", primary: !last, pick: "leaks" }
+  if (tools.leaksScanning) return check(b, { kind: "info", status: "Scanning in the background…",
+    meta: "You'll get a notification when it's done", facts: last ? [fact("Folder", last.folder)] : [],
+    actions: [{ label: "Stop scan", primary: true, stop: "gitleaks" }] })
+  if (!last) return check(b, { kind: "off", status: "Ready — choose a folder to scan",
+    meta: "Read-only: it reports, it never changes a repo", facts: [fact("Installed", "Yes")],
+    note: "Keepwell looks for git repositories in the folder you pick (up to four levels down) and checks their history. Secrets are masked; only where they are is kept.",
+    actions: [choose] })
+  var f = last.findings || []
+  var facts = [fact("Folder", last.folder), fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
+  for (var i = 0; i < Math.min(f.length, 30); i++)
+    facts.push(fact(f[i].repo, f[i].file + (f[i].line ? ":" + f[i].line : ""), f[i].rule + (f[i].commit ? " · " + f[i].commit : "")))
+  return check(b, { kind: f.length ? "attn" : "good",
+    status: f.length ? plural(f.length, "possible secret", "possible secrets") + " in your repositories"
+      : last.repos ? "No secrets found" : "No git repositories in that folder",
+    meta: "Scanned " + ago(last.at, now) + " · " + plural(last.repos, "repository", "repositories"),
+    facts: facts,
+    note: f.length ? "Each line is a file and line where something looks like a key or password, and the commit it was added in. If it's real, change that password or key — removing it from the file doesn't remove it from git history." : "",
+    actions: [{ label: "Scan again", primary: f.length > 0, rescan: "leaks", folder: last.folder }, choose] })
 }
 
 // ---------------------------------------------------------------- privacy
@@ -362,7 +431,9 @@ function traces(p) {
 function permissions(p) {
   var b = CATALOG.perms
   if (!p.flatpak) return check(b, { kind: "good", status: "No Flatpak apps on this computer",
-    meta: "Nothing to review", facts: [fact("Flatpak", "Not installed")] })
+    meta: "Nothing to review", facts: [fact("Flatpak", "Not installed")],
+    note: "Flatpak is another way to install apps, each in its own sandbox. If you start using it, Flatseal shows what each app may reach.",
+    actions: [{ label: "Install Flatpak and Flatseal", elevated: true, act: "install-flatseal" }] })
   if (p.apps === 0) return check(b, { kind: "good", status: "No Flatpak apps installed", meta: "Nothing to review" })
   if (!p.flatseal) return check(b, { kind: "off", status: "Flatseal isn't installed",
     meta: plural(p.apps, "Flatpak app", "Flatpak apps") + " could be reviewed",
@@ -403,16 +474,22 @@ function unclaimed() {
     meta: "Arrives with the cleanup tools" })
 }
 
-function snapshots(p) {
+function snapshots(p, now) {
   var b = CATALOG.snap
   if (!p.snapper || !p.rootConfig) return check(b, { kind: "attn", status: "Snapshots aren't set up",
     meta: "Omarchy normally sets this up", facts: [fact("Snapper", p.snapper ? "Installed, no root config" : "Not installed")] })
   var sync = p.limineSync === "enabled"
+  var last = p.last
+  var when = last ? ago(last.at, now) + " · " + stamp(last.at) : ""
   return check(b, { kind: sync ? "good" : "attn",
-    status: sync ? "Set up — boot menu stays in sync" : "Set up, but the boot menu isn't syncing",
-    meta: "Snapshot list needs admin rights to read",
-    facts: [fact("Snapper", "Set up for the system"), fact("Boot menu", sync ? "In sync" : "Sync off", "limine-snapper-sync"),
-            fact("Snapshots", "Ask the Snapshots plugin", "")],
+    status: last ? "Last snapshot " + ago(last.at, now) : sync ? "Set up — boot menu stays in sync" : "Set up, but the boot menu isn't syncing",
+    meta: (sync ? "Boot menu in sync" : "Boot menu not syncing") + (p.keep ? " · keeps " + p.keep : ""),
+    facts: [
+      fact("Last snapshot", last ? "#" + last.number + " · " + when : "None in the recent system log"),
+      fact("Boot menu", sync ? "In sync" : "Sync off", "limine-snapper-sync"),
+      fact("Kept", p.keep ? "The newest " + p.keep : "Snapper's default", "Snapper")
+    ],
+    note: "Omarchy takes a snapshot before every update. To roll back, pick a snapshot in the boot menu; it restores the system, not your home folder.",
     actions: [{ label: "Take snapshot now", primary: true, elevated: true, act: "snapshot" }] })
 }
 
@@ -472,7 +549,7 @@ function build(doc, now) {
     av: function() { return antivirus(p("antivirus"), now) },
     upd: function() { return updates(p("updates"), now) },
     fw: function() { return firewall(p("firewall")) },
-    leaks: function() { return leaks(p("tools")) },
+    leaks: function() { return leaks(p("tools"), now) },
     browser: function() { return browser(p("browser"), p("chromiumPolicy")) },
     netpriv: function() { return networkPrivacy(p("netPrivacy")) },
     apps: function() { return apps(p("apps"), p("netPrivacy")) },
@@ -481,7 +558,7 @@ function build(doc, now) {
     perms: function() { return permissions(p("permissions")) },
     clean: function() { return cleanup(p("cleanup")) },
     unclaimed: unclaimed,
-    snap: function() { return snapshots(p("snapshots")) },
+    snap: function() { return snapshots(p("snapshots"), now) },
     disk: function() { return disk(p("disk")) },
     timers: timers
   }

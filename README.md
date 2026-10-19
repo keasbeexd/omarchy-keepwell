@@ -8,11 +8,11 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.4.0.** Every check reads your real system, and every action
+> **Status: 0.5.0.** Every check reads your real system and every action
 > works: installs, firewall, updates, snapshots, cleanup and the privacy
-> settings through a visible terminal, caches and activity traces by moving
-> them to the Trash (below). Scheduled background checks and the
-> unclaimed-files finder come later.
+> settings through a visible terminal; virus and secrets scans in the
+> background; caches and activity traces by moving them to the Trash.
+> Scheduled background checks and the unclaimed-files finder come later.
 
 ## What it looks like
 
@@ -69,9 +69,11 @@ omarchy-shell keepwell toggle
 
 - Once when the shell starts, so the bar icon is meaningful.
 - When you open the window, if the last result is more than a minute old.
-- When you press **Check again**.
+- When you press **Check again**, and after an action's terminal closes.
+- Every 15 seconds while a scan you started is running **and** the window is
+  open, so you see it end. Nothing polls otherwise.
 
-Nothing repeats on a timer. Every check is read-only.
+Every check is read-only.
 
 ## What it reads and runs
 
@@ -84,8 +86,9 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Check | Reads | Runs |
 |---|---|---|
 | Firewall | `/etc/ufw/ufw.conf`, `/etc/default/ufw`, `/etc/ufw/user*.rules` | `systemctl is-enabled/is-active ufw` |
-| Known vulnerabilities | — | `arch-audit` (only when you ask — see Network) |
-| Antivirus | modification times in `/var/lib/clamav`, `~/.clamtk/history` | `systemctl is-enabled/is-active clamav-freshclam`, `crontab -l` (ClamTK keeps its schedule there) |
+| Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (only when you ask — see Network) |
+| Antivirus | modification times in `/var/lib/clamav`; the newest of Keepwell's scan logs | `systemctl is-enabled/is-active clamav-freshclam`, `systemctl --user is-active keepwell-clamscan`, `crontab -l` |
+| Secrets in your code | the last scan summary (`gitleaks.json`) | `systemctl --user is-active keepwell-gitleaks` |
 | System updates | the last 1 MiB of `/var/log/pacman.log` | — |
 | Camera & microphone | — | `pw-dump` |
 | Browser telemetry | `~/.config/chromium/Local State`, `~/.config/chromium/Default/Preferences` (three keys); the names (`/proc/<pid>/comm`) of your own processes, to see whether Chromium is running | — |
@@ -95,7 +98,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Activity traces | counts in `~/.local/share/recently-used.xbel`, `~/.bash_history`; size of `~/.cache/thumbnails` | — |
 | App permissions | — | `flatpak list --app` |
 | Cleanup | size of `~/.cache` | `paccache -d` (dry run), `pacman -Qtdq`, `pacman -Qi`, `journalctl --disk-usage` |
-| Snapshots | `/etc/snapper/configs/root` | `systemctl is-enabled limine-snapper-sync` |
+| Snapshots | `/etc/snapper/configs/root` (how many are kept) | `systemctl is-enabled limine-snapper-sync`; `journalctl -u limine-snapper-sync -g CREATE,ISDIR -n 1` — the snapshot list is root-only, but the boot-menu sync service logs each new snapshot's number, and the journal is readable without root |
 | Disk usage | free space on `/` | — |
 
 Files in your home are opened without following symlinks, checked to be
@@ -104,18 +107,33 @@ never follow symlinks and stop at an entry and time budget.
 
 ### Network
 
-Only one check uses the network: **Known vulnerabilities** runs `arch-audit`,
-which downloads Arch's public security data from
-`https://security.archlinux.org`. It runs only when you press **Check now** on
-that check or **Check again** in the header — never at startup or on opening
-the window. Nothing else in Keepwell makes a network request.
+Keepwell itself makes no network requests. Three things it starts do, only
+when you ask:
+
+- **Known vulnerabilities** runs `arch-audit`, which downloads Arch's public
+  security data from `https://security.archlinux.org` (on **Check now** or
+  **Check again** — never at startup or on opening the window).
+- **Arch security tracker ↗** opens `https://security.archlinux.org/` in
+  your browser (`xdg-open`).
+- Installs download from your Arch mirrors, and ClamAV's definition updates
+  from ClamAV's servers, in the terminal after you confirm.
 
 ### What it writes
 
-Keepwell keeps no state files. Changes happen only through the actions
-below: in a terminal after you confirm, or by moving what you tick to the
-Trash. The privacy settings are the only files Keepwell itself creates;
-they are listed under [Removing](#removing).
+Changes to your system happen only through the actions below: in a
+terminal after you confirm, or by moving what you tick to the Trash. The
+privacy settings are listed under [Removing](#removing).
+
+Keepwell's own state lives in `~/.local/state/keepwell/`. Every path to it is
+opened without following symlinks; the folder is kept at 0700 and its files
+at 0600, written through a fresh temporary file and a rename.
+
+| File | Holds |
+|---|---|
+| `pending.json` | the terminal Keepwell is waiting on (its Hyprland window address, the check and action), so a shell restarted meanwhile — `omarchy update` does that — still brings you back; removed when the terminal closes, ignored after a day |
+| `audit.json` | the last arch-audit result you asked for: package names, severities, fix versions |
+| `gitleaks.json` | the last secrets scan: the folder, how many repositories, and for each finding only the repository, file, line, rule name and commit — never the secret |
+| `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files |
 
 ## Actions
 
@@ -139,10 +157,9 @@ script, `bin/keepwell-run`, in three steps:
 
 | Action | Commands |
 |---|---|
-| Install arch-audit, gitleaks, GufW, Flatseal, Disk Usage Analyzer | `omarchy pkg add <package>` |
+| Install arch-audit, gitleaks, GufW, Flatpak and Flatseal, Disk Usage Analyzer | `omarchy pkg add <package>` |
 | Install ClamAV | `omarchy pkg add clamav`, `sudo freshclam`, `sudo systemctl enable --now clamav-freshclam.service` |
 | Turn on definition updates | `sudo systemctl enable --now clamav-freshclam.service` |
-| Scan Downloads | `clamscan --recursive --infected -- ~/Downloads` (reports only) |
 | Install UFW / Turn on the firewall | `omarchy pkg add ufw` (install only), `sudo ufw default deny incoming`, `sudo ufw default allow outgoing`, `sudo ufw enable` |
 | Deny incoming | `sudo ufw default deny incoming` |
 | Turn off the firewall | `sudo ufw disable` |
@@ -185,6 +202,36 @@ Keepwell reads the file back and puts the original bytes back if it doesn't
 match. Undoing removes exactly Keepwell's lines and restores the file as it
 was.
 
+### Background scans
+
+Virus and secrets scans can take a long time, change nothing, and need no
+root, so they don't use a terminal. Each runs as a transient user service
+that is independent of the shell (a restart doesn't stop it), at idle CPU
+and disk priority, one of each kind at a time:
+
+```bash
+systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
+  --property=Nice=19 --property=IOSchedulingClass=idle \
+  --property=ExecStopPost=/usr/bin/notify-send --app-name=Keepwell "Virus scan ended" "…" \
+  -- /usr/bin/clamscan --recursive --infected --log=<new log> [--exclude-dir=…] -- <folder>
+```
+
+- **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~` but
+  skips `~/.cache`, `~/.local/share/Trash` and Keepwell's own logs. A home
+  scan can take half an hour or more.
+- **Choose a folder…** (Secrets in your code) opens a folder picker
+  (`zenity --file-selection --directory`, which Omarchy shows through the
+  desktop portal). Keepwell steps aside while it is open. In the folder you
+  pick it finds git repositories up to four levels down, never through a
+  symlink, at most 100, and runs
+  `gitleaks git --redact --report-format json --report-path - -- <repo>` on
+  each in the `keepwell-gitleaks` service. Only locations are kept (see
+  `gitleaks.json` above).
+- **Stop scan** runs `systemctl --user stop` on that service.
+- When a scan ends (or is stopped), one desktop notification says so.
+  Keepwell deletes, moves or changes nothing it finds; infected files are
+  listed for you to decide on.
+
 ### Moving things to Trash
 
 App caches (folders directly inside `~/.cache`) and activity traces (the
@@ -208,8 +255,15 @@ after you confirm.
 omarchy plugin remove keasbeexd.keepwell
 ```
 
-This removes the plugin directory and its bar entry. Keepwell keeps no state
-or cache files of its own.
+This removes the plugin directory and its bar entry. It does not remove
+Keepwell's state folder, `~/.local/state/keepwell/` (described under
+[What it writes](#what-it-writes)): it holds scan logs that name infected
+files, the locations of possible secrets, and the last vulnerability result.
+Delete that folder yourself if you don't want to keep them.
+
+A scan that is running carries on until it ends, even after removal; stop it
+first with **Stop scan**, or with
+`systemctl --user stop keepwell-clamscan.service keepwell-gitleaks.service`.
 
 **Privacy settings you turned on stay in effect after removal.** Untick them
 in Keepwell first (Network privacy → Change settings, Browser telemetry →

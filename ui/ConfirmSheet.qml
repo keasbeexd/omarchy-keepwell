@@ -17,15 +17,20 @@ Item {
   signal canceled()
   signal snapshotToggled()
   signal optionToggled(string id)
+  signal allToggled()
 
   readonly property bool ready: plan !== null && !failed
   readonly property var options: plan && Array.isArray(plan.options) ? plan.options : []
   readonly property bool hasSteps: ready && plan.steps.length > 0
-  // Keyboard cursor over one flat list: each option, the snapshot box,
-  // Cancel, Open terminal.
-  readonly property int boxIndex: options.length
-  readonly property int cancelIndex: options.length + 1
-  readonly property int confirmIndex: options.length + 2
+  // "Select all" when there are enough options for it to save effort.
+  readonly property bool hasAll: options.length >= 3
+  readonly property bool allChecked: options.length > 0 && options.every(function(o) { return o.checked })
+  readonly property int first: hasAll ? 1 : 0
+  // Keyboard cursor over one flat list: "Select all", each option, the
+  // snapshot box, Cancel, Open terminal.
+  readonly property int boxIndex: options.length + first
+  readonly property int cancelIndex: boxIndex + 1
+  readonly property int confirmIndex: boxIndex + 2
   property int cursor: confirmIndex
   readonly property bool anyRoot: {
     if (!plan) return false
@@ -42,7 +47,8 @@ Item {
 
   // Keep the option under the keyboard cursor in view.
   function follow() {
-    var row = optionRows.itemAt(cursor)
+    if (cursor < first) { flick.contentY = 0; return }
+    var row = optionRows.itemAt(cursor - first)
     if (!row) return
     var top = row.mapToItem(body, 0, 0).y
     var bottom = top + row.height
@@ -53,7 +59,8 @@ Item {
     if (!plan) return
     // From the plan itself: the bindings that count options may not have
     // caught up yet when this handler runs.
-    var last = (Array.isArray(plan.options) ? plan.options.length : 0) + 2
+    var n = Array.isArray(plan.options) ? plan.options.length : 0
+    var last = n + (n >= 3 ? 1 : 0) + 2
     if (!_placed) { cursor = last; _placed = true }
     else if (cursor > last) cursor = last
   }
@@ -130,6 +137,22 @@ Item {
             visible: root.options.length > 0
             Layout.fillWidth: true
             spacing: Tokens.sp(10)
+
+            CheckBox {
+
+              visible: root.hasAll
+
+              Layout.fillWidth: true
+
+              label: "Select all"
+
+              checked: root.allChecked
+
+              hasCursor: root.cursor === 0 && root.hasAll
+
+              onToggled: root.allToggled()
+
+            }
             Repeater {
               id: optionRows
               model: root.options
@@ -142,7 +165,7 @@ Item {
                   Layout.fillWidth: true
                   label: modelData.label
                   checked: modelData.checked
-                  hasCursor: root.cursor === index
+                  hasCursor: root.cursor === index + root.first
                   onToggled: root.optionToggled(modelData.id)
                 }
                 KText {
@@ -281,7 +304,8 @@ Item {
 
   // Keys while open, forwarded from the window's key handler.
   function activate(i) {
-    if (i < root.options.length) root.optionToggled(root.options[i].id)
+    if (root.hasAll && i === 0) root.allToggled()
+    else if (i < root.boxIndex) root.optionToggled(root.options[i - root.first].id)
     else if (i === root.boxIndex) root.snapshotToggled()
     else if (i === root.cancelIndex) root.canceled()
     else if (root.hasSteps) root.confirmed()

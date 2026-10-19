@@ -20,14 +20,17 @@ Item {
   property var checked: ({})        // id -> true
 
   signal toggled(string id)
+  signal allToggled()
   signal confirmed()
   signal canceled()
 
   readonly property var list: items || []
   readonly property var chosen: list.filter(function(i) { return root.checked[i.id] === true })
   readonly property real chosenBytes: chosen.reduce(function(n, i) { return n + (i.bytes || 0) }, 0)
-  readonly property int cancelIndex: list.length
-  readonly property int confirmIndex: list.length + 1
+  readonly property bool allChecked: list.length > 0 && chosen.length === list.length
+  // Keyboard cursor: 0 is "Select all", rows are 1…n, then the buttons.
+  readonly property int cancelIndex: list.length + 1
+  readonly property int confirmIndex: list.length + 2
   property int cursor: 0
 
   visible: opened
@@ -35,7 +38,8 @@ Item {
   onCursorChanged: follow()
 
   function follow() {
-    var row = rows.itemAt(cursor)
+    if (cursor === 0) { flick.contentY = 0; return }
+    var row = rows.itemAt(cursor - 1)
     if (!row) return
     var top = row.y, bottom = row.y + row.height
     if (top < flick.contentY) flick.contentY = top
@@ -92,6 +96,16 @@ Item {
         }
       }
 
+      CheckBox {
+        visible: root.list.length > 1
+        Layout.fillWidth: true
+        label: "Select all"
+        hint: "(" + root.list.length + ")"
+        checked: root.allChecked
+        hasCursor: root.cursor === 0
+        onToggled: { root.cursor = 0; root.allToggled() }
+      }
+
       Flickable {
         id: flick
         visible: root.list.length > 0
@@ -122,7 +136,7 @@ Item {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 checked: root.checked[modelData.id] === true
-                hasCursor: root.cursor === index
+                hasCursor: root.cursor === index + 1
                 onToggled: root.toggled(modelData.id)
               }
               Column {
@@ -151,7 +165,7 @@ Item {
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: { root.cursor = index; root.toggled(modelData.id) }
+                onClicked: { root.cursor = index + 1; root.toggled(modelData.id) }
               }
               Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Tokens.line }
             }
@@ -206,8 +220,10 @@ Item {
       root.cursor = Math.min(root.confirmIndex, root.cursor + 1)
     else if (k === Qt.Key_Tab) root.cursor = root.cursor < root.cancelIndex ? root.confirmIndex : 0
     else if (k === Qt.Key_Backtab) root.cursor = root.cursor < root.cancelIndex ? root.cancelIndex : 0
+    else if (k === Qt.Key_A && (event.modifiers & Qt.ControlModifier)) root.allToggled()
     else if (k === Qt.Key_Space || k === Qt.Key_Return || k === Qt.Key_Enter) {
-      if (root.cursor < root.list.length) root.toggled(root.list[root.cursor].id)
+      if (root.cursor === 0) root.allToggled()
+      else if (root.cursor <= root.list.length) root.toggled(root.list[root.cursor - 1].id)
       else if (root.cursor === root.cancelIndex) root.canceled()
       else if (root.chosen.length > 0) root.confirmed()
     } else return false
