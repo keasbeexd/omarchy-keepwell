@@ -32,9 +32,11 @@ Rectangle {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
 
+    ScrollHint { flick: flick }
+
     ColumnLayout {
       id: content
-      width: flick.width
+      width: flick.width - Tokens.sp(8)
       spacing: Tokens.sp(14)
 
       RowLayout {

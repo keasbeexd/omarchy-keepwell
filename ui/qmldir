@@ -6,3 +6,4 @@ RailItem 1.0 RailItem.qml
 CheckRow 1.0 CheckRow.qml
 SectionBanner 1.0 SectionBanner.qml
 DetailPane 1.0 DetailPane.qml
+ScrollHint 1.0 ScrollHint.qml
