@@ -177,8 +177,6 @@ Scope {
       return
     }
     if (action.trashSet) { openTrash(action.trashSet, action.label, context); return }
-    if (action.schedule === true) { openSchedule(); return }
-    if (action.scheduleOff === true) { scheduleRun(["off"], "Background checks are off."); return }
     if (action.unignore === "unclaimed") {
       startJob(["unclaimed", "unignore"], "Ignored folders will be suggested again.")
       return
@@ -746,10 +744,9 @@ Scope {
       item.sections = Qt.binding(function() { return root.sections })
       item.checkedAt = Qt.binding(function() { return root.checkedAt })
       item.checking = Qt.binding(function() { return root.checking })
-      item.scheduleWords = Qt.binding(function() {
-        var c = root.findCheck("timers")
-        return c && c.kind === "good" ? c.status : "Off"
-      })
+      item.schedule = Qt.binding(function() { return Present.schedule(root.doc, root.now) })
+      item.scheduleRequested.connect(root.openSchedule)
+      item.scheduleOffRequested.connect(function() { root.scheduleRun(["off"], "Background checks are off.") })
       item.confirmOpen = Qt.binding(function() { return root.confirmOpen })
       item.confirmPlan = Qt.binding(function() { return root.confirmPlan })
       item.confirmFailed = Qt.binding(function() { return root.confirmFailed })
