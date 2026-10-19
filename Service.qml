@@ -177,6 +177,8 @@ Scope {
       return
     }
     if (action.trashSet) { openTrash(action.trashSet, action.label, context); return }
+    if (action.schedule === true) { openSchedule(); return }
+    if (action.scheduleOff === true) { scheduleRun(["off"], "Background checks are off."); return }
     if (action.unignore === "unclaimed") {
       startJob(["unclaimed", "unignore"], "Ignored folders will be suggested again.")
       return
@@ -397,6 +399,98 @@ Scope {
         root.say(d.trashed.length ? "Moved " + d.trashed.length + " to Trash (" + Present.bytes(bytes)
                    + "). Empty the Trash to free the space." + (d.failed.length ? " " + d.failed.length + " couldn't be moved." : "")
                  : "Nothing could be moved.")
+      }
+      root.check(false)
+    }
+  }
+
+  // ---------------- background checks ----------------
+  // The sheet edits a copy; Save writes it through keepwell-run, which
+  // writes the timer and enables it (no root, no terminal).
+  property bool schedOpen: false
+  property bool schedLoading: true
+  property bool schedEnabled: false
+  property var schedDays: []
+  property string schedTime: "10:00"
+  property var schedParts: []
+
+  function openSchedule() {
+    if (schedReader.running) return
+    schedLoading = true
+    schedOpen = true
+    schedReader.start(python.concat([sourceDir + "/bin/keepwell-run", "schedule", "get"]))
+  }
+
+  BoundedProcess {
+    id: schedReader
+    maxBytes: 8192
+    timeoutMs: 10000
+    onFinished: function(ok, text) {
+      var d = null
+      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
+      if (!d || !Array.isArray(d.days) || typeof d.time !== "string" || !Array.isArray(d.parts)) {
+        root.schedOpen = false
+        root.say("Couldn't read the background check settings.")
+        return
+      }
+      root.schedEnabled = d.enabled === true
+      root.schedDays = d.days.filter(function(x) { return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"].indexOf(x) !== -1 })
+      root.schedTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(d.time) ? d.time : "10:00"
+      root.schedParts = d.parts.filter(function(x) { return ["vulns", "cleanup", "scan-downloads", "scan-home"].indexOf(x) !== -1 })
+      root.schedLoading = false
+    }
+  }
+
+  function toggleSchedDay(day) {
+    var all = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    var next = schedDays.indexOf(day) === -1 ? schedDays.concat([day]) : schedDays.filter(function(x) { return x !== day })
+    schedDays = all.filter(function(x) { return next.indexOf(x) !== -1 })
+  }
+  function everySchedDay() {
+    schedDays = schedDays.length === 7 ? [] : ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+  }
+  function stepSchedTime(minutes) {
+    var hm = schedTime.split(":")
+    var total = (Number(hm[0]) * 60 + Number(hm[1]) + minutes + 1440) % 1440
+    var pad = function(n) { return (n < 10 ? "0" : "") + n }
+    schedTime = pad(Math.floor(total / 60)) + ":" + pad(total % 60)
+  }
+  function toggleSchedPart(part) {
+    var next = schedParts.indexOf(part) === -1 ? schedParts.concat([part]) : schedParts.filter(function(x) { return x !== part })
+    // One virus scan target at a time.
+    if (part === "scan-home" && next.indexOf("scan-home") !== -1) next = next.filter(function(x) { return x !== "scan-downloads" })
+    if (part === "scan-downloads" && next.indexOf("scan-downloads") !== -1) next = next.filter(function(x) { return x !== "scan-home" })
+    schedParts = next
+  }
+  function chooseScanTarget(target) {
+    var on = schedParts.indexOf("scan-downloads") !== -1 || schedParts.indexOf("scan-home") !== -1
+    if (!on) return
+    schedParts = schedParts.filter(function(x) { return x.indexOf("scan-") !== 0 }).concat(["scan-" + target])
+  }
+  function saveSchedule() {
+    if (!schedDays.length || !schedParts.length) return
+    scheduleRun(["set", schedDays.join(","), schedTime, schedParts.join(",")], "")
+  }
+  function scheduleRun(args, message) {
+    if (schedWriter.running) return
+    schedMessage = message
+    schedWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "schedule"], args))
+  }
+  property string schedMessage: ""
+
+  BoundedProcess {
+    id: schedWriter
+    maxBytes: 8192
+    timeoutMs: 30000
+    onFinished: function(ok, text) {
+      var d = null
+      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
+      if (d && d.saved === true) {
+        root.schedOpen = false
+        root.say(root.schedMessage || ("Background checks saved." + (typeof d.next === "string" ? " Next: " + d.next.replace(/:00 [A-Z]{2,5}$/, "") + "." : "")))
+      } else {
+        root.say(d && d.reason === "exists" ? "A keepwell-report unit that Keepwell didn't write is in the way; nothing was changed."
+                 : "Couldn't save the background checks.")
       }
       root.check(false)
     }
@@ -652,6 +746,10 @@ Scope {
       item.sections = Qt.binding(function() { return root.sections })
       item.checkedAt = Qt.binding(function() { return root.checkedAt })
       item.checking = Qt.binding(function() { return root.checking })
+      item.scheduleWords = Qt.binding(function() {
+        var c = root.findCheck("timers")
+        return c && c.kind === "good" ? c.status : "Off"
+      })
       item.confirmOpen = Qt.binding(function() { return root.confirmOpen })
       item.confirmPlan = Qt.binding(function() { return root.confirmPlan })
       item.confirmFailed = Qt.binding(function() { return root.confirmFailed })
@@ -676,6 +774,21 @@ Scope {
       item.trashDayChoices = Qt.binding(function() { return root.trashDayChoices })
       item.trashDaysChosen.connect(root.chooseDays)
       item.trashIgnored.connect(root.ignoreItem)
+      item.schedOpen = Qt.binding(function() { return root.schedOpen })
+      item.schedLoading = Qt.binding(function() { return root.schedLoading })
+      item.schedBusy = Qt.binding(function() { return schedWriter.running })
+      item.schedEnabled = Qt.binding(function() { return root.schedEnabled })
+      item.schedDays = Qt.binding(function() { return root.schedDays })
+      item.schedTime = Qt.binding(function() { return root.schedTime })
+      item.schedParts = Qt.binding(function() { return root.schedParts })
+      item.schedDayToggled.connect(root.toggleSchedDay)
+      item.schedEveryDay.connect(root.everySchedDay)
+      item.schedTimeStepped.connect(root.stepSchedTime)
+      item.schedPartToggled.connect(root.toggleSchedPart)
+      item.schedScanTargetChosen.connect(root.chooseScanTarget)
+      item.schedSaved.connect(root.saveSchedule)
+      item.schedTurnedOff.connect(function() { root.scheduleRun(["off"], "Background checks are off.") })
+      item.schedCanceled.connect(function() { root.schedOpen = false })
       item.trashToggled.connect(root.toggleTrashItem)
       item.trashAccepted.connect(root.confirmTrash)
       item.trashCanceled.connect(root.cancelTrash)

@@ -8,11 +8,12 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.6.0.** Every check reads your real system and every action
+> **Status: 0.7.0.** Every check reads your real system and every action
 > works: installs, firewall, updates, snapshots, cleanup and the privacy
 > settings through a visible terminal; virus and secrets scans in the
 > background; caches, activity traces and unclaimed app folders by moving
-> them to the Trash. Scheduled background checks come next.
+> them to the Trash; optional scheduled checks that only notify. The
+> developer extras (osv-scanner) come next.
 
 ## What it looks like
 
@@ -74,6 +75,8 @@ omarchy-shell keepwell toggle
   when a background scan ends.
 - Every 15 seconds while a scan you started is running **and** the window is
   open, so you see it end. Nothing polls otherwise.
+- On the schedule you set under **Background checks**, if you turn them on
+  (off by default; see below).
 
 Every check is read-only.
 
@@ -141,6 +144,8 @@ at 0600, written through a fresh temporary file and a rename.
 | `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files |
 | `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
 | `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
+| `schedule.json` | your background-check choices: days, time and what to check (kept when you turn them off, so turning them on again starts from there) |
+| `report.json` | the last background check's one-line summary |
 
 ## Actions
 
@@ -271,6 +276,36 @@ claims its name** and **nothing in it has changed** for the age you choose
   folder again (**Stop ignoring** on the check undoes that). A folder is
   moved only if it is still a candidate at that moment.
 
+### Background checks
+
+Off until you turn them on. **Set up…** on the Background checks card lets you
+pick what to check — vulnerabilities (arch-audit; uses the network), a
+cleanup report, a virus scan of Downloads or your home folder — and the days
+of the week and the time (30-minute steps). Saving writes two files and
+enables the timer, with no root and no terminal:
+
+```
+~/.config/systemd/user/keepwell-report.timer     OnCalendar=Mon,Wed,Fri *-*-* 11:00:00, Persistent=true
+~/.config/systemd/user/keepwell-report.service   ExecStart=/usr/bin/python3 -I -S <plugin>/bin/keepwell-run report
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now keepwell-report.timer
+```
+
+The schedule is checked with `systemd-analyze calendar` before anything is
+written. Both files start with a `# Written by the Keepwell plugin` line;
+Keepwell refuses to replace a file of either name that lacks it, and **Turn
+off** (`systemctl --user disable --now keepwell-report.timer`) deletes only
+files that have it. `Persistent=true` runs a missed check at the next start.
+
+Each run runs the read-only check, starts the virus scan if you chose one
+(the same background scan as above, with its own notification), saves a
+one-line summary and sends one notification — for example "No fixes waiting
+for known issues; 681 MB can be freed." It never removes, installs or
+changes anything.
+
 ### Moving things to Trash
 
 App caches (folders directly inside `~/.cache`) and activity traces (the
@@ -303,6 +338,16 @@ Delete that folder yourself if you don't want to keep them.
 A scan that is running carries on until it ends, even after removal; stop it
 first with **Stop scan**, or with
 `systemctl --user stop keepwell-clamscan.service keepwell-gitleaks.service`.
+
+**If background checks are on, turn them off before removing** (Background
+checks → Turn off). Otherwise the timer stays and fails harmlessly each time,
+since the script it runs is gone. To remove it by hand:
+
+```bash
+systemctl --user disable --now keepwell-report.timer
+rm ~/.config/systemd/user/keepwell-report.timer ~/.config/systemd/user/keepwell-report.service
+systemctl --user daemon-reload
+```
 
 **Privacy settings you turned on stay in effect after removal.** Untick them
 in Keepwell first (Network privacy → Change settings, Browser telemetry →

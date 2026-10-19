@@ -18,6 +18,8 @@ Item {
   property var sections: []
   property string checkedAt: ""
   property bool checking: false
+  // "Off", or "Mon, Wed at 10:30", for the rail's footer.
+  property string scheduleWords: "Off"
 
   // network: also ask the Arch security tracker (arch-audit).
   signal checkRequested(bool network)
@@ -50,6 +52,23 @@ Item {
   property var trashDayChoices: []
   signal trashDaysChosen(int days)
   signal trashIgnored(string id)
+
+  // The background-checks sheet, driven by the service.
+  property bool schedOpen: false
+  property bool schedLoading: true
+  property bool schedBusy: false
+  property bool schedEnabled: false
+  property var schedDays: []
+  property string schedTime: "10:00"
+  property var schedParts: []
+  signal schedDayToggled(string day)
+  signal schedEveryDay()
+  signal schedTimeStepped(int minutes)
+  signal schedPartToggled(string part)
+  signal schedScanTargetChosen(string target)
+  signal schedSaved()
+  signal schedTurnedOff()
+  signal schedCanceled()
   signal trashAccepted()
   signal trashCanceled()
 
@@ -180,6 +199,10 @@ Item {
             if (trashSheet.handleKey(event)) event.accepted = true
             return
           }
+          if (root.schedOpen) {
+            if (schedSheet.handleKey(event)) event.accepted = true
+            return
+          }
           var actions = root.check.actions || []
           if (event.key === Qt.Key_Escape) {
             if (root.actionCursor >= 0) root.actionCursor = -1
@@ -283,13 +306,13 @@ Item {
                 Layout.margins: Tokens.sp(4)
                 spacing: Tokens.sp(6)
                 KText {
-                  text: "Background checks: Off"
+                  text: "Background checks: " + root.scheduleWords
                   font.pixelSize: Tokens.small
                   color: Tokens.fg2
                 }
                 KText {
                   width: parent.width
-                  text: "Nothing runs unless you turn it on."
+                  text: root.scheduleWords === "Off" ? "Nothing runs unless you turn it on." : "Notifies only; never changes anything."
                   font.pixelSize: Tokens.small
                   color: Tokens.fg3
                   wrapMode: Text.WordWrap
@@ -401,6 +424,27 @@ Item {
           onSnapshotToggled: root.confirmSnapshotToggled()
           onOptionToggled: function(id) { root.confirmOptionToggled(id) }
           onAllToggled: root.confirmAllToggled()
+        }
+
+        ScheduleSheet {
+          id: schedSheet
+          anchors.fill: parent
+          z: 10
+          opened: root.schedOpen
+          loading: root.schedLoading
+          busy: root.schedBusy
+          enabled: root.schedEnabled
+          days: root.schedDays
+          time: root.schedTime
+          parts: root.schedParts
+          onDayToggled: function(day) { root.schedDayToggled(day) }
+          onEveryDay: root.schedEveryDay()
+          onTimeStepped: function(m) { root.schedTimeStepped(m) }
+          onPartToggled: function(part) { root.schedPartToggled(part) }
+          onScanTargetChosen: function(t) { root.schedScanTargetChosen(t) }
+          onSaved: root.schedSaved()
+          onTurnedOff: root.schedTurnedOff()
+          onCanceled: root.schedCanceled()
         }
 
         TrashSheet {

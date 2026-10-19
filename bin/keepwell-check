@@ -708,6 +708,27 @@ def probe_chromium_policy():
             "files": files, "blackOps": black_ops, "keepwell": keepwell}
 
 
+def probe_schedule():
+    try:
+        doc = keepwell_state.read_json("schedule.json") or {}
+        last = keepwell_state.read_json("report.json") or {}
+    except (OSError, ValueError):
+        doc, last = {}, {}
+    days = [d for d in doc.get("days", []) if d in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")]
+    at = doc.get("time") if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(doc.get("time"))) else None
+    parts = [x for x in doc.get("parts", []) if x in ("vulns", "cleanup", "scan-downloads", "scan-home")]
+    on = text(["/usr/bin/systemctl", "--user", "is-enabled", "keepwell-report.timer"], timeout=3, cap=256)[1].strip() == "enabled"
+    p = {"enabled": on and bool(days) and at is not None, "days": days, "time": at, "parts": parts}
+    if p["enabled"]:
+        _, out = text(["/usr/bin/systemd-analyze", "calendar", "--",
+                       "%s *-*-* %s:00" % (",".join(d.capitalize() for d in days), at)], timeout=5, cap=4096)
+        m = re.search(r"(?m)^\s*Next elapse: (.+)$", out)
+        p["next"] = clean(m.group(1).strip(), 64) if m else None
+    if isinstance(last.get("at"), int):
+        p["last"] = {"at": last["at"], "summary": clean(str(last.get("summary", "")), 200)}
+    return p
+
+
 def probe_unclaimed():
     found = keepwell_unclaimed.find()
     return {"count": len(found["items"]), "bytes": sum(i["bytes"] for i in found["items"]),
@@ -749,7 +770,8 @@ def main():
                      ("snapshots", probe_snapshots),
                      ("disk", probe_disk),
                      ("cleanup", probe_cleanup),
-                     ("unclaimed", probe_unclaimed)):
+                     ("unclaimed", probe_unclaimed),
+                     ("schedule", probe_schedule)):
         if remaining() <= 0.5:
             probes[name] = {"skipped": True}
             continue

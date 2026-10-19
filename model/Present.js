@@ -98,7 +98,7 @@ var CATALOG = {
   disk: { id: "disk", title: "Disk usage", tool: "Disk usage",
     what: "See which folders take the most space. Large caches and package downloads are normal; Cleanup handles those." },
   timers: { id: "timers", title: "Background checks", tool: "Keepwell timer",
-    what: "Keepwell can check for vulnerabilities and reclaimable space on a schedule and send a notification. It never removes or changes anything on its own." }
+    what: "On the days and at the time you choose, Keepwell can check for vulnerabilities, report reclaimable space and start a virus scan, then send one notification saying what it found. It never removes or changes anything on its own." }
 }
 
 var LAYOUT = [
@@ -528,11 +528,35 @@ function disk(p) {
       : install("Install Disk Usage Analyzer", "install-baobab")] })
 }
 
-function timers() {
-  return check(CATALOG.timers, { kind: "off", status: "Nothing runs in the background",
-    meta: "Optional weekly reports — notify, never act",
-    facts: [fact("Vulnerability check", "Off"), fact("Cleanup report", "Off")],
-    actions: [{ label: "Set up…", primary: true, disabled: true }] })
+var DAY_NAMES = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" }
+var PART_NAMES = { vulns: "Vulnerability check", cleanup: "Cleanup report",
+                   "scan-downloads": "Virus scan of Downloads", "scan-home": "Virus scan of your home folder" }
+
+// "Mon, Wed, Fri", "Every day", "Weekdays", "Weekends".
+function dayWords(days) {
+  var d = (days || []).join(",")
+  if (d === "mon,tue,wed,thu,fri,sat,sun") return "Every day"
+  if (d === "mon,tue,wed,thu,fri") return "Weekdays"
+  if (d === "sat,sun") return "Weekends"
+  return (days || []).map(function(x) { return DAY_NAMES[x] || x }).join(", ")
+}
+
+function timers(p, now) {
+  var b = CATALOG.timers
+  var setUp = { label: p.enabled ? "Change…" : "Set up…", primary: !p.enabled, schedule: true }
+  var last = p.last ? fact("Last check", ago(p.last.at, now) + " · " + p.last.summary) : null
+  if (!p.enabled) return check(b, { kind: "off", status: "Nothing runs in the background",
+    meta: "Optional checks on days you choose — notify, never act",
+    facts: [fact("Schedule", "Off")].concat(last ? [last] : []),
+    note: "Pick what to check (vulnerabilities, cleanup, a virus scan), the days and the time. Each run sends one notification saying what it found; it never removes, installs or changes anything.",
+    actions: [setUp] })
+  return check(b, { kind: "good",
+    status: dayWords(p.days) + " at " + p.time,
+    meta: (p.next ? "Next: " + p.next.replace(/:00 [A-Z]{2,5}$/, "") : "Scheduled") + " · notifies, never acts",
+    facts: [fact("Checks", (p.parts || []).map(function(x) { return PART_NAMES[x] || x }).join(", "), "keepwell-report.timer")]
+      .concat(last ? [last] : []),
+    note: (p.parts || []).indexOf("vulns") !== -1 ? "The vulnerability check downloads Arch's security list from security.archlinux.org." : "",
+    actions: [setUp, { label: "Turn off", scheduleOff: true }] })
 }
 
 // ---------------------------------------------------------------- assembly
@@ -584,7 +608,7 @@ function build(doc, now) {
     unclaimed: function() { return unclaimed(p("unclaimed")) },
     snap: function() { return snapshots(p("snapshots"), now) },
     disk: function() { return disk(p("disk")) },
-    timers: timers
+    timers: function() { return timers(p("schedule"), now) }
   }
   var out = []
   for (var i = 0; i < LAYOUT.length; i++) {
@@ -593,7 +617,7 @@ function build(doc, now) {
       if (!probes) return loading(id)
       var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", leaks: "tools",
         browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
-        clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk" }[id]
+        clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk", timers: "schedule" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
         return check(CATALOG[id], { kind: "off", status: "Couldn't check this time", meta: "Try Check again" })
