@@ -1,0 +1,8 @@
+# Agent instruction files must never ship: omarchy plugin add copies the tree verbatim.
+CLAUDE.md
+AGENTS.md
+.claude/
+.codex/
+.agents/
+__pycache__/
+*.pyc

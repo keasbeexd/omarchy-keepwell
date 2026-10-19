@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "keasbeexd.keepwell",
+  "name": "Keepwell",
+  "version": "0.1.0",
+  "author": "Marc Ferro @keasbeexd",
+  "license": "MIT",
+  "description": "Keep your system well: security, privacy and system care in one place, built on the standard tools Arch already has.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Keepwell",
+    "description": "Shows whether anything needs your attention and opens the Keepwell window.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
