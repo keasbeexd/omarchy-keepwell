@@ -92,7 +92,7 @@ var CATALOG = {
   clean: { id: "clean", title: "Cleanup", tool: "paccache · pacman",
     what: "Old package downloads, unused packages, logs and app caches build up over time. You see every item and its size before anything is removed." },
   unclaimed: { id: "unclaimed", title: "Unclaimed files", tool: "Keepwell",
-    what: "Folders in your home that no installed package owns and that haven't changed in a long time — often leftovers from apps you removed. Suggestions only." },
+    what: "App folders in your home that nothing installed uses any more and that haven't changed in a long time — usually left behind by apps you removed. Suggestions only; nothing is removed unless you tick it." },
   snap: { id: "snap", title: "Snapshots", tool: "Snapper · Limine",
     what: "A snapshot is a restore point for the system (not your home folder). To roll back, pick it from the boot menu." },
   disk: { id: "disk", title: "Disk usage", tool: "Disk usage",
@@ -474,9 +474,28 @@ function cleanup(p) {
               { label: "Review app cache…", trash: true, trashSet: "cache" }] })
 }
 
-function unclaimed() {
-  return check(CATALOG.unclaimed, { kind: "off", status: "Not available in this build",
-    meta: "Arrives with the cleanup tools" })
+var AGE_WORDS = { 90: "3 months", 180: "6 months", 365: "1 year", 730: "2 years" }
+function ageWords(days) { return AGE_WORDS[days] || plural(days, "day", "days") }
+
+function unclaimed(p) {
+  var b = CATALOG.unclaimed
+  if (typeof p.count !== "number") return check(b, { kind: "off", status: "Couldn't look this time", meta: "Try Check again" })
+  var review = { label: "Review…", primary: p.count > 0, trash: true, trashSet: "unclaimed" }
+  var facts = [
+    fact("Looked at", plural(p.looked, "app folder", "app folders") + " nothing installed claims", "~, ~/.config, ~/.local/share"),
+    fact("Untouched for", ageWords(p.days) + " or more", "adjustable")
+  ]
+  if (p.ignored) facts.push(fact("Ignored", plural(p.ignored, "folder", "folders"), "never suggested"))
+  var actions = [review]
+  if (p.ignored) actions.push({ label: "Stop ignoring " + plural(p.ignored, "folder", "folders"), unignore: "unclaimed" })
+  return check(b, {
+    kind: p.count ? "info" : "good",
+    status: p.count ? plural(p.count, "app folder", "app folders") + " nothing uses any more" : "Nothing left behind",
+    meta: p.count ? bytes(p.bytes) + " · untouched for " + ageWords(p.days) + " or more · verify before removing"
+      : "No unclaimed folder untouched for " + ageWords(p.days),
+    facts: facts,
+    note: "A folder is suggested only when no installed package, program, app or Omarchy default uses its name and nothing in it has changed for that long. Check each one: it may hold something you want. Removing moves it to the Trash.",
+    actions: actions })
 }
 
 function snapshots(p, now) {
@@ -562,7 +581,7 @@ function build(doc, now) {
     traces: function() { return traces(p("traces")) },
     perms: function() { return permissions(p("permissions")) },
     clean: function() { return cleanup(p("cleanup")) },
-    unclaimed: unclaimed,
+    unclaimed: function() { return unclaimed(p("unclaimed")) },
     snap: function() { return snapshots(p("snapshots"), now) },
     disk: function() { return disk(p("disk")) },
     timers: timers
@@ -574,7 +593,7 @@ function build(doc, now) {
       if (!probes) return loading(id)
       var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", leaks: "tools",
         browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
-        clean: "cleanup", snap: "snapshots", disk: "disk" }[id]
+        clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
         return check(CATALOG[id], { kind: "off", status: "Couldn't check this time", meta: "Try Check again" })

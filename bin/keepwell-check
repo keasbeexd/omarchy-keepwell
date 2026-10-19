@@ -36,6 +36,7 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import keepwell_state  # noqa: E402
+import keepwell_unclaimed  # noqa: E402
 
 START = time.monotonic()
 TOTAL_BUDGET = 25.0          # seconds for the whole run
@@ -707,6 +708,12 @@ def probe_chromium_policy():
             "files": files, "blackOps": black_ops, "keepwell": keepwell}
 
 
+def probe_unclaimed():
+    found = keepwell_unclaimed.find()
+    return {"count": len(found["items"]), "bytes": sum(i["bytes"] for i in found["items"]),
+            "days": found["days"], "ignored": found["ignored"], "looked": found["looked"]}
+
+
 def probe_tools():
     p = {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
     if p["gitleaks"]:
@@ -741,7 +748,8 @@ def main():
                      ("traces", probe_traces),
                      ("snapshots", probe_snapshots),
                      ("disk", probe_disk),
-                     ("cleanup", probe_cleanup)):
+                     ("cleanup", probe_cleanup),
+                     ("unclaimed", probe_unclaimed)):
         if remaining() <= 0.5:
             probes[name] = {"skipped": True}
             continue

@@ -8,11 +8,11 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.5.0.** Every check reads your real system and every action
+> **Status: 0.6.0.** Every check reads your real system and every action
 > works: installs, firewall, updates, snapshots, cleanup and the privacy
 > settings through a visible terminal; virus and secrets scans in the
-> background; caches and activity traces by moving them to the Trash.
-> Scheduled background checks and the unclaimed-files finder come later.
+> background; caches, activity traces and unclaimed app folders by moving
+> them to the Trash. Scheduled background checks come next.
 
 ## What it looks like
 
@@ -101,6 +101,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | App permissions | — | `flatpak list --app` |
 | Cleanup | size of `~/.cache` | `paccache -d` (dry run), `pacman -Qtdq`, `pacman -Qi`, `journalctl --disk-usage` |
 | Snapshots | `/etc/snapper/configs/root` (how many are kept) | `systemctl is-enabled limine-snapper-sync`; `journalctl -u limine-snapper-sync -g CREATE,ISDIR -n 1` — the snapshot list is root-only, but the boot-menu sync service logs each new snapshot's number, and the journal is readable without root |
+| Unclaimed files | names in `/usr/bin`, `~/.local/bin`, `~/.local/share/mise/shims`, `~/.var/app` and the desktop-entry folders; `.config/<name>` and `.local/share/<name>` mentions in Omarchy's own text files under `/usr/share/omarchy` (at most 24 MiB read, cached); modification times inside candidate folders | `pacman -Qq` |
 | Disk usage | free space on `/` | — |
 
 Files in your home are opened without following symlinks, checked to be
@@ -138,6 +139,8 @@ at 0600, written through a fresh temporary file and a rename.
 | `audit.json` | the last arch-audit result you asked for: package names, severities, fix versions |
 | `gitleaks.json` | the last secrets scan: the folder, how many repositories, and for each finding only the repository, file, line, rule name and commit — never the secret |
 | `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files |
+| `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
+| `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
 
 ## Actions
 
@@ -242,6 +245,31 @@ systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
   1,204 files checked in 12 s."), and calls `omarchy-shell keepwell refresh`.
   Keepwell deletes, moves or changes nothing it finds; infected files are
   listed for you to decide on.
+
+### Unclaimed app folders
+
+pacman never installs into your home folder, so "owned by a package" says
+nothing there. Keepwell instead suggests a folder when **nothing installed
+claims its name** and **nothing in it has changed** for the age you choose
+(3 months, 6 months — the default — 1 year or 2 years).
+
+- Looked at: hidden entries directly in `~`, and entries in `~/.config` and
+  `~/.local/share`. Never your own files (Documents and the like), never a
+  symlink, never something you don't own.
+- Claimed by: an installed package; a program in `/usr/bin`, `~/.local/bin`
+  or mise's shims; a desktop app or Flatpak app; a folder Omarchy's own files
+  mention or ship a default for (Omarchy creates folders for apps you may
+  install later); or a standard desktop location (keyrings, Trash,
+  autostart…). A name that starts like something installed, or that
+  something installed starts like, counts as claimed — `hypr` by `hyprland`,
+  `gtk-3.0` by `gtk3` — so the finder errs towards suggesting too little.
+- A folder too large to look through completely within its budget (600
+  entries, 8,000 overall, 4 seconds) is never suggested, since something
+  inside it may have changed recently.
+- **Review…** lists each folder with its size and how long it has been
+  untouched. Tick what to move to the Trash; **Ignore** never suggests a
+  folder again (**Stop ignoring** on the check undoes that). A folder is
+  moved only if it is still a candidate at that moment.
 
 ### Moving things to Trash
 

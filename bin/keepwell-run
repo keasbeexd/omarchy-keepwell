@@ -6,6 +6,8 @@
                                     terminal, wait for Enter, then run it
     keepwell-run list  <set>                  items that can go to Trash, as JSON
     keepwell-run trash <set> <id>...          move those items to Trash
+    keepwell-run unclaimed days <n> | ignore <id>... | unignore
+                                              the unclaimed finder's settings
     keepwell-run scan  downloads|home         start a ClamAV scan in the background
     keepwell-run leaks <folder>               start a gitleaks scan in the background
     keepwell-run stop  clamscan|gitleaks      stop that background scan
@@ -18,8 +20,9 @@
 
 --with picks among an action's options (cleanup, for one); without it the
 options marked safe are used. Sets for Trash are "cache" (folders in
-~/.cache) and "traces" (recent files, shell history, thumbnails); moving to
-Trash needs no root, and everything moved can be restored from the Trash.
+~/.cache), "traces" (recent files, shell history, thumbnails) and
+"unclaimed" (see keepwell_unclaimed.py); moving to Trash needs no root, and
+everything moved can be restored from the Trash.
 
 Both modes build the plan from the same table below, so the commands the
 confirm dialog shows are the commands that run. Actions are a fixed set and
@@ -47,6 +50,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import keepwell_state  # noqa: E402
+import keepwell_unclaimed  # noqa: E402
 
 OMARCHY = "/usr/bin/omarchy"
 SUDO = "/usr/bin/sudo"
@@ -1022,7 +1026,10 @@ def _owned(path):
 def resolve(which, item):
     """The absolute path for an item id, or None. Never a path from outside:
     traces come from a fixed map, cache items must be a plain name directly
-    inside ~/.cache that you own."""
+    inside ~/.cache that you own, and an unclaimed item must still be one of
+    the finder's candidates right now."""
+    if which == "unclaimed":
+        return keepwell_unclaimed.resolve(item)
     if which == "traces":
         entry = TRACES.get(item)
         return entry[1] if entry and _owned(entry[1]) else None
@@ -1037,6 +1044,12 @@ def resolve(which, item):
 def list_items(which):
     budget = [400000, time.monotonic() + 8]
     items = []
+    if which == "unclaimed":
+        found = keepwell_unclaimed.find()
+        return {"set": which, "days": found["days"], "dayChoices": list(keepwell_unclaimed.DAY_CHOICES),
+                "ignored": found["ignored"], "looked": found["looked"],
+                "items": [{"id": c["id"], "label": c["id"].split("/")[-1], "path": c["path"],
+                           "bytes": c["bytes"], "complete": True, "days": c["days"]} for c in found["items"]]}
     if which == "traces":
         for key, (label, path) in TRACES.items():
             if resolve("traces", key):
@@ -1080,7 +1093,19 @@ def trash(which, ids):
 
 def main():
     args = sys.argv[1:]
-    if len(args) >= 2 and args[0] in ("list", "trash") and args[1] in ("cache", "traces"):
+    if len(args) >= 2 and args[0] == "unclaimed":
+        conf = keepwell_unclaimed.settings()
+        if len(args) == 3 and args[1] == "days" and args[2].isdigit() and int(args[2]) in keepwell_unclaimed.DAY_CHOICES:
+            keepwell_unclaimed.save_settings(int(args[2]), conf["ignored"])
+        elif len(args) >= 3 and args[1] == "ignore" and all(keepwell_unclaimed._valid_id(a) for a in args[2:]):
+            keepwell_unclaimed.save_settings(conf["days"], conf["ignored"] + args[2:52])
+        elif args[1:] == ["unignore"]:
+            keepwell_unclaimed.save_settings(conf["days"], [])
+        else:
+            return 2
+        sys.stdout.write(json.dumps({"saved": True}))
+        return 0
+    if len(args) >= 2 and args[0] in ("list", "trash") and args[1] in ("cache", "traces", "unclaimed"):
         if args[0] == "list" and len(args) == 2:
             sys.stdout.write(json.dumps(list_items(args[1]), separators=(",", ":")))
             return 0
