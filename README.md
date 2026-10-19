@@ -2,6 +2,8 @@
 
 *Keep your system well.*
 
+![Keepwell's window, framed in a Turbo Pascal-style screen](preview.png)
+
 An Omarchy shell plugin that brings security, privacy and system care into one
 window, for people new to Linux. Keepwell is a frontend and a coordinator, not
 a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
