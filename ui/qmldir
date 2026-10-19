@@ -1,0 +1,8 @@
+singleton Tokens 1.0 Tokens.qml
+KText 1.0 KText.qml
+Glyph 1.0 Glyph.qml
+ActionButton 1.0 ActionButton.qml
+RailItem 1.0 RailItem.qml
+CheckRow 1.0 CheckRow.qml
+SectionBanner 1.0 SectionBanner.qml
+DetailPane 1.0 DetailPane.qml
