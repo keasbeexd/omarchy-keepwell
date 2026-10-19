@@ -746,6 +746,81 @@ def probe_unclaimed():
             "days": found["days"], "ignored": found["ignored"], "looked": found["looked"]}
 
 
+def _sshd_settings():
+    """The settings sshd would use: drop-ins included where `Include` names
+    them, the first value for each key winning (sshd's own rule), and
+    conditional `Match` blocks left out."""
+    want = {"passwordauthentication": "yes", "kbdinteractiveauthentication": "yes",
+            "challengeresponseauthentication": None, "permitrootlogin": "prohibit-password", "port": "22"}
+    found = {}
+
+    def walk(path, depth):
+        raw = read_file(path, 64 * 1024)
+        if raw is None or depth > 2:
+            return
+        for line in raw.decode("utf-8", "replace").splitlines():
+            parts = line.split("#", 1)[0].split()
+            if not parts:
+                continue
+            key = parts[0].lower()
+            if key == "match":
+                return
+            if key == "include" and len(parts) > 1:
+                for pattern in parts[1:]:
+                    pattern = pattern if pattern.startswith("/") else "/etc/ssh/" + pattern
+                    if not pattern.startswith("/etc/ssh/"):
+                        continue
+                    folder, glob_part = os.path.split(pattern)
+                    try:
+                        names = sorted(os.listdir(folder))[:100]
+                    except OSError:
+                        continue
+                    rx = re.compile("^" + re.escape(glob_part).replace("\\*", ".*") + "$")
+                    for name in names:
+                        if rx.match(name):
+                            walk(os.path.join(folder, name), depth + 1)
+            elif key in want and key not in found and len(parts) > 1:
+                found[key] = parts[1].lower()
+
+    walk("/etc/ssh/sshd_config", 0)
+    kbd = found.get("kbdinteractiveauthentication") or found.get("challengeresponseauthentication") or "yes"
+    return {"passwords": found.get("passwordauthentication", "yes") == "yes" or kbd == "yes",
+            "rootLogin": found.get("permitrootlogin", want["permitrootlogin"]),
+            "port": found.get("port", "22") if re.fullmatch(r"\d{1,5}", found.get("port", "22")) else "22"}
+
+
+def probe_remote():
+    p = {"installed": exists("/usr/bin/sshd")}
+    if not p["installed"]:
+        return p
+    p["enabled"], p["active"] = unit_state("sshd.service")
+    sock_enabled, sock_active = unit_state("sshd.socket")
+    p["socket"] = sock_enabled == "enabled" or sock_active == "active"
+    p.update(_sshd_settings())
+    rules = b"".join(read_file(f, 1 << 20) or b"" for f in ("/etc/ufw/user.rules", "/etc/ufw/user6.rules"))
+    p["firewallAllows"] = bool(re.search(rb"(?m)^### tuple ### allow (?:tcp|any) " + p["port"].encode() + rb" ", rules))
+    keys = read_file(os.path.join(HOME, ".ssh", "authorized_keys"), 256 * 1024, user_owned=True)
+    p["authorizedKeys"] = len([l for l in (keys or b"").splitlines() if l.strip() and not l.startswith(b"#")])
+    p["keepwellKeysOnly"] = os.path.isfile("/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf")
+    return p
+
+
+def probe_failed():
+    units = []
+    for scope in ([], ["--user"]):
+        _, out = text(["/usr/bin/systemctl"] + scope + ["list-units", "--state=failed", "--output=json", "--no-pager"],
+                      timeout=5, cap=256 * 1024)
+        try:
+            items = json.loads(out) if out.strip() else []
+        except ValueError:
+            items = []
+        for it in items[:30] if isinstance(items, list) else []:
+            unit = str((it or {}).get("unit", ""))
+            if re.fullmatch(r"[A-Za-z0-9@._:\\-]{1,128}\.(service|socket|path|timer|mount|target|swap|automount|slice|scope)", unit):
+                units.append({"unit": unit, "user": bool(scope), "description": clean(str(it.get("description", "")), 100)})
+    return {"units": units[:30]}
+
+
 def probe_tools():
     p = {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
     if p["gitleaks"]:
@@ -792,7 +867,9 @@ def main():
                      ("disk", probe_disk),
                      ("cleanup", probe_cleanup),
                      ("unclaimed", probe_unclaimed),
-                     ("schedule", probe_schedule)):
+                     ("schedule", probe_schedule),
+                     ("remote", probe_remote),
+                     ("failed", probe_failed)):
         if remaining() <= 0.5:
             probes[name] = {"skipped": True}
             continue

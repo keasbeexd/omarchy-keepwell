@@ -104,6 +104,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Check | Reads | Runs |
 |---|---|---|
 | Firewall | `/etc/ufw/ufw.conf`, `/etc/default/ufw`, `/etc/ufw/user*.rules` | `systemctl is-enabled/is-active ufw` |
+| Remote access | `/etc/ssh/sshd_config` and its `Include`d drop-ins (port, password and root login settings), `/etc/ufw/user*.rules` (whether the SSH port is allowed); the number of keys in `~/.ssh/authorized_keys` | `systemctl is-enabled/is-active sshd.service sshd.socket` |
 | Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (hourly and when you ask — see Network); `busctl get-property … NetworkManager Metered` |
 | Antivirus | modification times in `/var/lib/clamav`; the newest of Keepwell's scan logs | `systemctl is-enabled/is-active clamav-freshclam`, `systemctl --user is-active keepwell-clamscan`, `crontab -l` |
 | Secrets in your code | the last scan summary (`gitleaks.json`) | `systemctl --user is-active keepwell-gitleaks` |
@@ -120,6 +121,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Snapshots | `/etc/snapper/configs/root` (how many are kept) | `systemctl is-enabled limine-snapper-sync`; `journalctl -u limine-snapper-sync -g CREATE,ISDIR -n 1` — the snapshot list is root-only, but the boot-menu sync service logs each new snapshot's number, and the journal is readable without root |
 | Unclaimed files | names in `/usr/bin`, `~/.local/bin`, `~/.local/share/mise/shims`, `~/.var/app` and the desktop-entry folders; `.config/<name>` and `.local/share/<name>` mentions in Omarchy's own text files under `/usr/share/omarchy` (at most 24 MiB read, cached); modification times inside candidate folders | `pacman -Qq` |
 | Disk usage | free space on `/` | — |
+| Failed services | — | `systemctl list-units --state=failed --output=json` and the same with `--user` (unit name and description only) |
 
 Files in your home are opened without following symlinks, checked to be
 regular files you own, and read only up to a size limit. Directory sizes
@@ -198,6 +200,11 @@ script, `bin/keepwell-run`, in three steps:
 | Install UFW / Turn on the firewall | `omarchy pkg add ufw` (install only), `sudo ufw default deny incoming`, `sudo ufw default allow outgoing`, `sudo ufw enable` |
 | Deny incoming | `sudo ufw default deny incoming` |
 | Turn off the firewall | `sudo ufw disable` |
+| Turn off SSH | `sudo systemctl disable --now sshd.service` |
+| Allow SSH keys only (offered once a key is in `~/.ssh/authorized_keys`) | writes `/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf` (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`), `sudo sshd -t` — if the test fails the file is removed again — then `sudo systemctl try-reload-or-restart sshd.service`. Open sessions stay open |
+| Allow SSH passwords again | removes that file, `sudo systemctl try-reload-or-restart sshd.service` |
+| Show failed services (reads only) | `systemctl [--user] status --no-pager --lines=15 -- <unit>` for each failed unit |
+| Clear the failed list | `sudo systemctl reset-failed -- <system units>`, `systemctl --user reset-failed -- <your units>`; nothing is restarted |
 | Update the system | `omarchy update` |
 | Take a snapshot | `omarchy snapshot create` |
 | Clean up (you tick which) | `sudo paccache -r -k 3` (old versions, or `-k 1` for all but the newest), `sudo paccache -r -u -k 0` (downloads of removed packages), `sudo pacman -Rns -- <unused packages, listed>`, `sudo journalctl --vacuum-time=2weeks` |
@@ -389,7 +396,7 @@ rm ~/.config/systemd/user/keepwell-deep.timer ~/.config/systemd/user/keepwell-de
 systemctl --user daemon-reload
 ```
 
-**Privacy settings you turned on stay in effect after removal.** Untick them
+**Privacy and SSH settings you turned on stay in effect after removal.** Untick them
 in Keepwell first (Network privacy → Change settings, Browser telemetry →
 Remove privacy policy) to undo them cleanly. If the plugin is already gone,
 these are everything Keepwell can have written:
@@ -401,6 +408,7 @@ these are everything Keepwell can have written:
 | `/etc/NetworkManager/conf.d/90-keepwell-connectivity.conf`, `90-keepwell-identity.conf` | `sudo rm` them, then `sudo systemctl reload NetworkManager` |
 | `/etc/avahi/avahi-daemon.conf`: each `# keepwell:` line and the line after it; a `#keepwell-was: ` prefix | `sudoedit` the file: delete those pairs, strip the prefix, then `sudo systemctl try-restart avahi-daemon` |
 | `/etc/chromium/policies/managed/keepwell-privacy.json` | `sudo rm` it |
+| `/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf` (Allow SSH keys only) | `sudo rm` it, then `sudo systemctl try-reload-or-restart sshd` |
 | `~/.config/uwsm/env.d/90-keepwell-debuginfod`, `90-keepwell-do-not-track` | `rm` them; they stop applying at the next login |
 
 Packages Keepwell installed for you (arch-audit, ClamAV, gitleaks, GufW,
