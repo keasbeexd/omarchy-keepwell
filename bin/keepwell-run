@@ -261,6 +261,11 @@ ACTIONS = {
         title="Remove Chromium privacy policy",
         summary="Removes the policy file Keepwell installed. Chromium goes back to your profile's settings at its next start.",
         system=False, steps=lambda o: _policy_off()),
+    "flatpak-update": dict(
+        title="Update Flatpak apps",
+        summary="omarchy update doesn't update Flatpak apps. This updates them and their runtimes from Flathub (or wherever each came from).",
+        system=False, steps=lambda o: [
+            step("Update Flatpak apps and runtimes", ["/usr/bin/flatpak", "update"])]),
     "ssh-off": dict(
         title="Turn off SSH",
         summary="Stops the SSH server and keeps it from starting with the computer. Nobody can log in to this computer over the network until you turn it on again.",

@@ -105,6 +105,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 
 | Check | Reads | Runs |
 |---|---|---|
+| Software outside updates | names in `~/.local/bin`, `/usr/local/bin`, `~/bin`, `~/go/bin`, `~/.local/share/pipx/venvs`, `~/.local/share/uv/tools`, and `.AppImage` files in `~/Applications`, `~/AppImages`, `~/Downloads`; the first four bytes of each candidate (is it a compiled program?); `~/.cargo/.crates.toml`; the last AUR answer (`aur.json`) | `pacman -Qmq`, `pacman -Qo` (for candidates outside your home), the AUR request (see Network) |
 | Firewall | `/etc/ufw/ufw.conf`, `/etc/default/ufw`, `/etc/ufw/user*.rules` | `systemctl is-enabled/is-active ufw` |
 | Remote access | `/etc/ssh/sshd_config` and its `Include`d drop-ins (port, password and root login settings), `/etc/ufw/user*.rules` (whether the SSH port is allowed); the number of keys in `~/.ssh/authorized_keys` | `systemctl is-enabled/is-active sshd.service sshd.socket` |
 | Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (hourly and when you ask — see Network); `busctl get-property … NetworkManager Metered` |
@@ -131,7 +132,7 @@ never follow symlinks and stop at an entry and time budget.
 
 ### Network
 
-Keepwell itself makes no network requests. These things it starts do:
+The Keepwell window makes no network requests. These things it starts do:
 
 - **Known vulnerabilities** runs `arch-audit`, which downloads Arch's public
   security list (about 900 KB) from `https://security.archlinux.org`:
@@ -140,6 +141,13 @@ Keepwell itself makes no network requests. These things it starts do:
   a connection NetworkManager marks as metered (the last result stays, with
   its time); if the tracker can't be reached, the last result stays, marked
   "couldn't refresh". Roughly 20 MB a day on an unmetered connection.
+- **Software outside updates** asks the AUR which of your foreign packages
+  (`pacman -Qm`) it still has: one HTTPS request to
+  `https://aur.archlinux.org/rpc/v5/info` carrying only those package names
+  (`curl -q --proto =https --max-redirs 0 --max-time 10 --max-filesize 1048576`).
+  The hourly run asks at most every six hours and never on a metered
+  connection; **Refresh** always asks. If the AUR can't be reached, the last
+  answer stays.
 - **Dependency vulnerabilities** runs `osv-scanner`, which sends your
   projects' dependency names and versions to Google's OSV.dev service, only
   when you press a scan button. Clicking a row opens its advisory on
@@ -172,6 +180,7 @@ at 0600, written through a fresh temporary file and a rename.
 | `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
 | `schedules.json` | your deep-scan schedule: days, time, which scans, the battery rule (kept when you turn it off, so turning it on again starts from there) |
 | `runs.json` | the last deep-scan run's time and one-line summary, and which missed run you were told about or dismissed |
+| `aur.json` | the last AUR answer: when it was asked, which foreign package names were checked, and which the AUR no longer has |
 | `alerts.json` | which checks you've already been notified about, so each new problem notifies once |
 
 ## Actions
@@ -202,6 +211,7 @@ script, `bin/keepwell-run`, in three steps:
 | Install UFW / Turn on the firewall | `omarchy pkg add ufw` (install only), `sudo ufw default deny incoming`, `sudo ufw default allow outgoing`, `sudo ufw enable` |
 | Deny incoming | `sudo ufw default deny incoming` |
 | Turn off the firewall | `sudo ufw disable` |
+| Update Flatpak apps | `flatpak update` (omarchy update doesn't) |
 | Turn off SSH | `sudo systemctl disable --now sshd.service` |
 | Allow SSH keys only (offered once a key is in `~/.ssh/authorized_keys`) | writes `/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf` (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`), `sudo sshd -t` — if the test fails the file is removed again — then `sudo systemctl try-reload-or-restart sshd.service`. Open sessions stay open |
 | Allow SSH passwords again | removes that file, `sudo systemctl try-reload-or-restart sshd.service` |
