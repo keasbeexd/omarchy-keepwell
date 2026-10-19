@@ -214,12 +214,12 @@ Item {
             if (actions.length > 0) root.actionCursor = Math.min(actions.length - 1, root.actionCursor + 1)
           } else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) {
             root.actionCursor = Math.max(-1, root.actionCursor - 1)
-          } else if (event.key === Qt.Key_F5) {
+          } else if (event.key === Qt.Key_R || event.key === Qt.Key_F5) {
             root.notice = ""
             root.checkRequested(true)
           } else if (event.key === Qt.Key_S) {
             root.scheduleRequested()
-          } else if (event.key === Qt.Key_R && root.schedules.missed && root.schedules.missed.length) {
+          } else if (event.key === Qt.Key_M && root.schedules.missed && root.schedules.missed.length) {
             root.runNow(root.schedules.missed[0].kind)
           } else if (event.key === Qt.Key_D && root.schedules.missed && root.schedules.missed.length) {
             root.dismissMissed(root.schedules.missed[0].kind)
@@ -306,20 +306,20 @@ Item {
 
               Rectangle { Layout.fillWidth: true; height: 1; color: Tokens.line }
 
-              // The always-on checks and the deep-scan schedule: settings of
+              // The quick checks and the deep-scan schedule: settings of
               // Keepwell, so they live here rather than among the checks. S
               // opens them.
               ColumnLayout {
                 Layout.fillWidth: true
                 Layout.margins: Tokens.sp(4)
                 spacing: Tokens.sp(6)
-                KText { text: "CHECKS"; font.pixelSize: Tokens.caption; font.letterSpacing: 0.6; color: Tokens.fg3 }
+                KText { text: "SCHEDULE"; font.pixelSize: Tokens.caption; font.letterSpacing: 0.6; color: Tokens.fg3 }
                 ColumnLayout {
                   Layout.fillWidth: true
                   spacing: Tokens.sp(1)
                   RowLayout {
                     Layout.fillWidth: true
-                    KText { Layout.fillWidth: true; text: "Always on"; font.pixelSize: Tokens.small; font.bold: true }
+                    KText { Layout.fillWidth: true; text: "Quick checks"; font.pixelSize: Tokens.small; font.bold: true }
                     KText { text: "HOURLY"; font.pixelSize: Tokens.caption; font.bold: true }
                   }
                   KText { Layout.fillWidth: true; text: root.schedules.always || ""; font.pixelSize: Tokens.caption; color: Tokens.fg2; wrapMode: Text.WordWrap }
@@ -359,7 +359,7 @@ Item {
                 }
                 ActionButton {
                   Layout.topMargin: Tokens.sp(2)
-                  label: "Checks…"
+                  label: "Schedule…"
                   onActivated: root.scheduleRequested()
                 }
               }
@@ -464,8 +464,8 @@ Item {
             spacing: Tokens.sp(18)
 
             Repeater {
-              model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["S", "checks"]]
-                .concat(root.schedules.missed && root.schedules.missed.length ? [["R", "run missed"], ["D", "dismiss"]] : [])
+              model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["R", "refresh"], ["S", "schedule"]]
+                .concat(root.schedules.missed && root.schedules.missed.length ? [["M", "run missed"], ["D", "dismiss"]] : [])
                 .concat([["Esc", "close"]])
               delegate: Row {
                 required property var modelData

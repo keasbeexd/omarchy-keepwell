@@ -622,7 +622,7 @@ function nextWords(s) {
   return m[1] + " " + Number(m[4]) + " " + months[Number(m[3]) - 1] + ", " + m[5]
 }
 
-// The always-on checks and the deep-scan schedule, for the rail's footer and
+// The quick checks and the deep-scan schedule, for the rail's footer and
 // the missed-run strip: settings of Keepwell rather than checks of the system.
 function schedules(doc, now) {
   var probe = doc && doc.probes && doc.probes.schedule && typeof doc.probes.schedule === "object" ? doc.probes.schedule : {}

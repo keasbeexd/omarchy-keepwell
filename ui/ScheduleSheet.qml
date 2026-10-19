@@ -1,8 +1,8 @@
 import QtQuick
 import QtQuick.Layouts
 
-// What Keepwell checks by itself, and the deep scans you can schedule.
-// Always-on checks need no setup and are listed with how they work. Deep
+// The quick checks Keepwell runs by itself, and the deep scans you can
+// schedule. Quick checks need no schedule and are listed with how they work. Deep
 // scans are opt-in, on the days and at the time you choose; a run the
 // computer was off or asleep for is reported as missed, never run late.
 Item {
@@ -128,8 +128,8 @@ Item {
       ColumnLayout {
         Layout.fillWidth: true
         spacing: Tokens.sp(4)
-        KText { text: "KEEPWELL · CHECKS"; font.pixelSize: Tokens.caption; font.letterSpacing: 0.6; color: Tokens.fg3 }
-        KText { text: "How Keepwell checks"; font.pixelSize: Tokens.heading; font.bold: true }
+        KText { text: "KEEPWELL · SCHEDULE"; font.pixelSize: Tokens.caption; font.letterSpacing: 0.6; color: Tokens.fg3 }
+        KText { text: "Schedule"; font.pixelSize: Tokens.heading; font.bold: true }
       }
 
       Flickable {
@@ -153,12 +153,12 @@ Item {
           Rectangle { Layout.fillWidth: true; height: 1; color: Tokens.line }
           RowLayout {
             Layout.fillWidth: true
-            KText { Layout.fillWidth: true; text: "Always on"; font.pixelSize: Tokens.title; font.bold: true }
-            KText { text: "NO SETUP"; font.pixelSize: Tokens.caption; font.bold: true; color: Tokens.fg2 }
+            KText { Layout.fillWidth: true; text: "Quick checks"; font.pixelSize: Tokens.title; font.bold: true }
+            KText { text: "ALWAYS ON"; font.pixelSize: Tokens.caption; font.bold: true; color: Tokens.fg2 }
           }
           KText {
             Layout.fillWidth: true
-            text: "Keepwell runs these by itself when you log in and every hour while you're logged in; opening Keepwell also refreshes the local ones if the last check is over a minute old. They take about a second, read only, and change nothing. When one newly needs attention, the shield changes and you get one notification."
+            text: "No schedule needed: these are always on, running once every hour while you're logged in, and also when you log in, when you open Keepwell (if the last check is over a minute old) and when you press Refresh. They take about a second, read only, and change nothing. When one newly needs attention, the shield changes and you get one notification."
             color: Tokens.fg2
             font.pixelSize: Tokens.small
             wrapMode: Text.WordWrap

@@ -43,9 +43,9 @@ theme.
 | ← → / h l     | move through a check's actions|
 | Tab / Shift+Tab | next / previous section     |
 | Enter         | run the selected (or primary) action |
-| F5            | Refresh: run every quick check again now |
-| S             | checks and the deep-scan schedule |
-| R / D         | run / dismiss a missed scheduled scan |
+| R / F5        | Refresh: run every quick check again now |
+| S             | Schedule: quick checks and the deep-scan schedule |
+| M / D         | run / dismiss a missed scheduled scan |
 | Esc           | leave the actions, then close |
 
 ## Installing
@@ -70,14 +70,14 @@ omarchy-shell keepwell toggle
 
 ## When checks run
 
-**Always on.** The quick checks — every check in the window except the
-deep scans — run by themselves, with nothing to set up:
+**Quick checks** — every check in the window except the deep scans — need
+no schedule: they're always on, running once every hour, and also:
 
 - when the shell starts (at login), and **every hour** while you're logged
-  in, including arch-audit (see Network);
+  in — arch-audit included (see Network);
 - when you open the window, if the last result is more than a minute old
   (the local checks; arch-audit's last result is shown with its time);
-- when you press **Refresh** (or **F5**) — always, however recent the last
+- when you press **Refresh** (or **R** / **F5**) — always, however recent the last
   check, arch-audit included — after an action's terminal closes, and when
   a background scan ends.
 
@@ -310,8 +310,8 @@ claims its name** and **nothing in it has changed** for the age you choose
 
 ### Scheduled deep scans
 
-Off until you turn them on. **Checks…** at the bottom of the left rail (or
-**S**) lists the always-on checks and sets the deep-scan schedule: which
+Off until you turn them on. **Schedule…** at the bottom of the left rail (or
+**S**) explains the quick checks and sets the deep-scan schedule: which
 scans — a virus scan of Downloads or your home folder, the secrets scan, the
 dependency scan (each tool once it's installed) — the days of the week, the
 time (30-minute steps), and whether to skip them on battery (on by default).
@@ -344,7 +344,7 @@ scheduled time, the run doesn't happen late: a run that would start more
 than 10 minutes after its time is recorded as missed instead. Keepwell then
 raises the shield to Review, sends one notification, and shows a strip at
 the top of the window — "The last scheduled deep scan (Sat 24 Oct, 13:00) was
-missed. Next: …" — with **Run now** (**R**) and **Dismiss** (**D**).
+missed. Next: …" — with **Run now** (**M**) and **Dismiss** (**D**).
 
 ### Moving things to Trash
 
@@ -380,7 +380,7 @@ first with **Stop scan**, or with
 `systemctl --user stop keepwell-clamscan.service keepwell-gitleaks.service keepwell-osv.service`.
 
 **If deep scans are scheduled, turn the schedule off before removing**
-(**Checks…** at the bottom of the left rail). Otherwise the timer stays and fails harmlessly each time,
+(**Schedule…** at the bottom of the left rail). Otherwise the timer stays and fails harmlessly each time,
 since the script it runs is gone. To remove it by hand:
 
 ```bash
