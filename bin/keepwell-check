@@ -746,6 +746,16 @@ def probe_tools():
             last = None
         if last and isinstance(last.get("at"), int):
             p["leaks"] = last
+    if p["osvScanner"]:
+        p["osvScanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-osv.service"],
+                                timeout=3, cap=256)[1].strip() in ("active", "activating")
+        try:
+            osv = keepwell_state.read_json("osv.json")
+        except (OSError, ValueError):
+            osv = None
+        if osv and isinstance(osv.get("at"), int) and isinstance(osv.get("findings"), list):
+            osv["findings"] = osv["findings"][:100]
+            p["osv"] = osv
     return p
 
 

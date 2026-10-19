@@ -16,7 +16,8 @@
                                               the unclaimed finder's settings
     keepwell-run scan  downloads|home         start a ClamAV scan in the background
     keepwell-run leaks <folder>               start a gitleaks scan in the background
-    keepwell-run stop  clamscan|gitleaks      stop that background scan
+    keepwell-run osv <folder>                 start an osv-scanner scan in the background
+    keepwell-run stop  clamscan|gitleaks|osv  stop that background scan
     keepwell-run notify clamscan|gitleaks     (run when a scan ends) say what it found,
                                               and tell Keepwell to check again
     keepwell-run pick-folder                  ask for a folder (zenity), print it as JSON
@@ -78,8 +79,10 @@ DISPLAY_ENV = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DES
                "DBUS_SESSION_BUS_ADDRESS", "XCURSOR_SIZE", "XCURSOR_THEME", "GTK_THEME", "HOME", "LANG")
 
 
-def capture(argv, timeout=10.0, cap=256 * 1024, gui=False):
-    """stdout of argv as text, or "" on failure, overrun or overflow."""
+def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok=(0,)):
+    """stdout of argv as text, or "" on failure, overrun or overflow. ok:
+    exit codes that count as success (some scanners exit 1 when they find
+    something)."""
     env = {"PATH": "/usr/bin", "LC_ALL": "C"}
     if gui:
         env.update({k: os.environ[k] for k in DISPLAY_ENV if k in os.environ})
@@ -123,7 +126,7 @@ def capture(argv, timeout=10.0, cap=256 * 1024, gui=False):
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
         return ""
-    return b"".join(chunks).decode("utf-8", "replace") if proc.returncode == 0 else ""
+    return b"".join(chunks).decode("utf-8", "replace") if proc.returncode in ok else ""
 
 
 def human(n):
@@ -190,6 +193,10 @@ ACTIONS = {
         system=False, steps=lambda o: [
             step("Keep definitions up to date automatically",
                  ["/usr/bin/systemctl", "enable", "--now", "clamav-freshclam.service"], root=True)]),
+    "install-osv-scanner": dict(
+        title="Install osv-scanner",
+        summary="Adds Google's osv-scanner, which checks the libraries your projects depend on against the OSV vulnerability database.",
+        system=True, steps=lambda o: [pkg_add("osv-scanner")]),
     "install-gitleaks": dict(
         title="Install gitleaks",
         summary="Adds gitleaks, which finds passwords and keys committed to git repositories.",
@@ -766,7 +773,8 @@ def apply(action_id, snapshot, chosen=None):
 # and disk priority, one of each kind at a time, and they send one desktop
 # notification when they finish. Nothing they find is changed or deleted.
 
-UNITS = {"clamscan": "keepwell-clamscan.service", "gitleaks": "keepwell-gitleaks.service"}
+UNITS = {"clamscan": "keepwell-clamscan.service", "gitleaks": "keepwell-gitleaks.service",
+         "osv": "keepwell-osv.service"}
 
 
 def _background(unit, kind, argv):
@@ -804,19 +812,135 @@ def start_scan(target):
     return _background(UNITS["clamscan"], "clamscan", argv + ["--", path])
 
 
-def start_leaks(folder):
-    if not _trusted("/usr/bin/gitleaks"):
-        return {"started": False, "reason": "missing"}
+def _scan_root(folder):
+    """A folder to scan for projects, as a real absolute path, or None."""
     if folder == "~":
         folder = HOME
     elif folder.startswith("~/"):
         folder = os.path.join(HOME, folder[2:])
     real = os.path.realpath(folder)
     if not os.path.isabs(folder) or not os.path.isdir(real) or real in ("/", "/usr", "/etc", "/proc", "/sys"):
+        return None
+    return real
+
+
+def start_leaks(folder):
+    if not _trusted("/usr/bin/gitleaks"):
+        return {"started": False, "reason": "missing"}
+    real = _scan_root(folder)
+    if not real:
         return {"started": False, "reason": "folder"}
     me = os.path.realpath(__file__)
     return _background(UNITS["gitleaks"], "gitleaks",
                        ["/usr/bin/python3", "-I", "-S", me, "leaks-scan", real])
+
+
+def start_osv(folder):
+    if not _trusted("/usr/bin/osv-scanner"):
+        return {"started": False, "reason": "missing"}
+    real = _scan_root(folder)
+    if not real:
+        return {"started": False, "reason": "folder"}
+    me = os.path.realpath(__file__)
+    return _background(UNITS["osv"], "osv", ["/usr/bin/python3", "-I", "-S", me, "osv-scan", real])
+
+
+# osv-scanner reports each vulnerability as a full OSV record; a group joins
+# records that are the same problem under different ids (GHSA, CVE, a
+# language database). Severity is the group's max_severity (a CVSS score)
+# when present, else the advisory's own rating.
+SEVERITY_WORDS = {"CRITICAL": "Critical", "HIGH": "High", "MODERATE": "Medium", "MEDIUM": "Medium", "LOW": "Low"}
+SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Unknown": 4}
+
+
+def _severity(group, record):
+    score = group.get("max_severity") if isinstance(group, dict) else None
+    try:
+        n = float(score)
+    except (TypeError, ValueError):
+        n = None
+    if n is not None and n > 0:
+        return "Critical" if n >= 9 else "High" if n >= 7 else "Medium" if n >= 4 else "Low"
+    rating = ((record or {}).get("database_specific") or {}).get("severity")
+    return SEVERITY_WORDS.get(str(rating).upper(), "Unknown")
+
+
+def _fixed_in(record, name):
+    """Versions that fix this record for this package, from its affected
+    ranges (the OSV schema's events[].fixed)."""
+    out = []
+    for aff in (record or {}).get("affected") or []:
+        if not isinstance(aff, dict) or (aff.get("package") or {}).get("name") != name:
+            continue
+        for rng in aff.get("ranges") or []:
+            for ev in (rng or {}).get("events") or []:
+                fixed = (ev or {}).get("fixed")
+                if isinstance(fixed, str) and re.fullmatch(r"[A-Za-z0-9.+~_:-]{1,64}", fixed) and fixed not in out:
+                    out.append(fixed)
+    return out[:3]
+
+
+def _osv_findings(doc, repo, root):
+    findings = []
+    for res in (doc.get("results") or [])[:500]:
+        source = str(((res or {}).get("source") or {}).get("path", ""))
+        lockfile = os.path.relpath(source, repo) if source.startswith(repo) else os.path.basename(source)
+        for p in ((res or {}).get("packages") or [])[:2000]:
+            pkg = (p or {}).get("package") or {}
+            name, version = str(pkg.get("name", "")), str(pkg.get("version", ""))
+            records = {str(v.get("id")): v for v in (p.get("vulnerabilities") or []) if isinstance(v, dict)}
+            groups = [g for g in (p.get("groups") or []) if isinstance(g, dict) and g.get("ids")] or \
+                [{"ids": [i]} for i in records]
+            vulns = []
+            for g in groups[:50]:
+                ids = [str(i) for i in g["ids"] if isinstance(i, str)]
+                record = next((records[i] for i in ids if i in records), {})
+                aliases = ids + [str(a) for a in (record.get("aliases") or []) if isinstance(a, str)]
+                cve = next((a for a in aliases if re.fullmatch(r"CVE-\d{4}-\d{4,7}", a)), "")
+                vulns.append({"id": re.sub(r"[^A-Za-z0-9._:-]", "", ids[0])[:64], "cve": cve,
+                              "severity": _severity(g, record), "fixed": _fixed_in(record, name),
+                              "summary": _plain(str(record.get("summary", "")), 160)})
+            if not vulns or not name:
+                continue
+            vulns.sort(key=lambda v: SEVERITY_ORDER[v["severity"]])
+            findings.append({
+                "repo": (os.path.relpath(repo, root) if repo != root else os.path.basename(root))[:120],
+                "file": _plain(lockfile, 160), "ecosystem": _plain(str(pkg.get("ecosystem", "")), 32),
+                "package": _plain(name, 128), "version": _plain(version, 64),
+                "severity": vulns[0]["severity"], "vulns": vulns[:8], "count": len(vulns),
+                "fixable": all(v["fixed"] for v in vulns)})
+    return findings
+
+
+def osv_scan(root):
+    """Runs inside the background unit. One osv-scanner run per project, so a
+    huge folder can't stall the rest; a summary of what was found is kept."""
+    started = int(time.time())
+    repos = find_repos(root)
+    findings, scanned, failed, empty = [], 0, 0, 0
+    for repo in repos:
+        if not repo.startswith("/"):
+            continue
+        out = capture(["/usr/bin/osv-scanner", "scan", "source", "-r", "--format", "json", repo],
+                      timeout=300, cap=64 << 20, ok=(0, 1, 128))
+        try:
+            doc = json.loads(out) if out.strip() else {"results": []}
+        except ValueError:
+            failed += 1
+            continue
+        if not isinstance(doc, dict):
+            failed += 1
+            continue
+        scanned += 1
+        if not doc.get("results"):
+            empty += 1
+        findings += _osv_findings(doc, repo, root)
+    findings.sort(key=lambda f: (SEVERITY_ORDER[f["severity"]], not f["fixable"]))
+    summary = {"at": started, "folder": root.replace(HOME, "~", 1)[:200], "repos": len(repos),
+               "scanned": scanned, "failed": failed, "noLockfiles": empty,
+               "packages": len(findings), "findings": findings[:100], "finished": True}
+    keepwell_state.write("osv.json", json.dumps(summary, separators=(",", ":")).encode())
+    return 0
 
 
 def _plain(text_value, limit):
@@ -844,6 +968,16 @@ def notify(kind):
             body = "%s: %s, %s files checked%s." % (
                 where, ("%d infected file%s found" % (n, "" if n == 1 else "s")) if n else "nothing found",
                 files.group(1) if files else "?", took)
+    elif kind == "osv":
+        doc = keepwell_state.read_json("osv.json") or {}
+        if not doc.get("finished") or not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
+            title, body = "Dependency scan stopped", "Stopped before the end."
+        else:
+            n = doc.get("packages", 0)
+            fixable = sum(1 for f in doc.get("findings") or [] if f.get("fixable"))
+            title = "Dependency scan finished"
+            body = ("%d package%s with known vulnerabilities (%d fixable)" % (n, "" if n == 1 else "s", fixable)
+                    if n else "No known vulnerabilities") + " in %d project%s." % (doc.get("scanned", 0), "" if doc.get("scanned", 0) == 1 else "s")
     else:
         doc = keepwell_state.read_json("gitleaks.json") or {}
         if not doc.get("finished") or not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
@@ -1096,7 +1230,7 @@ def pending(args):
 
 def pick_folder():
     out = capture(["/usr/bin/zenity", "--file-selection", "--directory",
-                   "--title=Choose a folder of git repositories", "--filename=" + HOME + "/"],
+                   "--title=Choose a folder of projects", "--filename=" + HOME + "/"],
                   timeout=600, cap=8192, gui=True).strip()
     return {"folder": out if out.startswith("/") and "\n" not in out else ""}
 
@@ -1253,6 +1387,11 @@ def main():
         return notify(args[1])
     if len(args) == 2 and args[0] == "leaks-scan":
         return leaks_scan(args[1])
+    if len(args) == 2 and args[0] == "osv":
+        sys.stdout.write(json.dumps(start_osv(args[1])))
+        return 0
+    if len(args) == 2 and args[0] == "osv-scan":
+        return osv_scan(args[1])
     if args[:2] == ["schedule", "get"] and len(args) == 2:
         sys.stdout.write(json.dumps(schedule_get()))
         return 0
