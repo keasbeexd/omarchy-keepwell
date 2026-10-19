@@ -66,6 +66,8 @@ var CATALOG = {
 
   browser: { id: "browser", title: "Browser telemetry", tool: "Chromium",
     what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting; changing them comes in a later build, and will only ever touch the settings you tick." },
+  netpriv: { id: "netpriv", title: "Network privacy", tool: "hosts · resolved · NetworkManager",
+    what: "Small, optional settings that cut what this computer tells the network: telemetry hosts, backup DNS servers, Arch's connection check, your hardware address, local announcements and debug lookups. Each has a small cost, shown before anything changes." },
   apps: { id: "apps", title: "Data from your apps", tool: "Reporter",
     what: "Arch Linux sends no telemetry. Some apps you install do. This lists the ones Keepwell knows, and their opt-out state where it can be read." },
   cam: { id: "cam", title: "Camera & microphone", tool: "PipeWire",
@@ -89,7 +91,7 @@ var CATALOG = {
 
 var LAYOUT = [
   { id: "security", name: "Security", checks: ["audit", "av", "upd", "fw", "leaks"] },
-  { id: "privacy", name: "Privacy", checks: ["browser", "apps", "cam", "traces", "perms"] },
+  { id: "privacy", name: "Privacy", checks: ["browser", "netpriv", "apps", "cam", "traces", "perms"] },
   { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk", "timers"] }
 ]
 
@@ -212,36 +214,88 @@ function leaks(tools) {
 
 // ---------------------------------------------------------------- privacy
 
-function browser(p) {
+var BLACK_OPS = "managed by Black Ops"
+
+function browser(p, policy) {
   var b = CATALOG.browser
   if (!p.chromium) return check(b, { kind: "off", status: "Chromium isn't installed",
     meta: p.firefox ? "Firefox support comes later" : "No supported browser found" })
-  if (!p.profile) return check(b, { kind: "off", status: "No Chromium profile yet",
-    meta: "Open Chromium once, then check again" })
+  policy = policy || {}
+  var locked = policy.total > 0 && policy.set === policy.total
+  var policyFact = fact("Privacy policy",
+    !policy.set ? "Not installed" : locked ? "All " + policy.total + " in force" : policy.set + " of " + policy.total + " in force",
+    policy.blackOps ? BLACK_OPS : "system-wide policy")
+  var actions = policy.blackOps || locked ? [] : [{ label: "Apply privacy policy…", primary: true, elevated: true }]
+  if (!p.profile) return check(b, { kind: locked ? "good" : "off", status: "No Chromium profile yet",
+    meta: "Open Chromium once, then check again", facts: [policyFact], actions: actions })
   var explicitOn = p.metrics === true || p.safeBrowsingReports === true
   var allDefault = p.metrics === null && p.searchSuggest === null && p.safeBrowsingReports === null
   return check(b, {
-    kind: explicitOn ? "attn" : allDefault ? "info" : "good",
-    status: explicitOn ? "Usage reporting is switched on" : allDefault ? "Using Chromium's built-in defaults" : "Usage reporting is off",
+    kind: locked ? "good" : explicitOn ? "attn" : allDefault ? "info" : "good",
+    status: locked ? "Privacy policy is in force"
+      : explicitOn ? "Usage reporting is switched on"
+      : allDefault ? "Using Chromium's built-in defaults" : "Usage reporting is off",
     meta: p.running ? "Chromium is running" : "Chromium is closed",
     facts: [
       fact("Usage statistics", onOff(p.metrics), "Local State"),
       fact("Search suggestions", onOff(p.searchSuggest), "Preferences"),
-      fact("Safe Browsing reports", onOff(p.safeBrowsingReports), "Preferences")
+      fact("Safe Browsing reports", onOff(p.safeBrowsingReports), "Preferences"),
+      policyFact
     ],
-    note: (allDefault ? "None of these are set in your profile, so Chromium's own defaults apply. " : "")
-      + (p.running ? "Chromium rewrites its settings when it closes, so changes will wait until it isn't running." : ""),
-    actions: [{ label: "Review changes…", primary: true, disabled: true }]
+    note: locked ? "A policy overrides the profile settings above, whatever they say."
+      : "The privacy policy is the sturdy route: Chromium can't overwrite it, and it covers 14 settings at once without touching your profile."
+        + (p.running ? " It applies the next time Chromium starts." : ""),
+    actions: actions
+  })
+}
+
+function networkPrivacy(p) {
+  var b = CATALOG.netpriv
+  var items = []
+  function item(applies, on, k, v, owner) { if (applies) items.push({ on: on, f: fact(k, v, owner) }) }
+
+  var h = p.hosts || { blocked: 0, total: 0 }
+  item(h.total > 0, h.blocked === h.total, "Telemetry hosts",
+    h.blocked === 0 ? "Not blocked" : h.blocked === h.total ? "All " + h.total + " blocked" : h.blocked + " of " + h.total + " blocked",
+    h.blackOps ? BLACK_OPS : "/etc/hosts")
+  item(p.fallbackDns !== null && p.fallbackDns !== undefined, p.fallbackDns === "off", "Backup DNS servers",
+    p.fallbackDns === "off" ? "Off" : p.fallbackDns === "custom" ? "Your own servers" : "Public resolvers (Quad9, Cloudflare, Google)",
+    p.fallbackDnsBlackOps ? BLACK_OPS : "systemd-resolved")
+  item(p.connectivity !== null && p.connectivity !== undefined, p.connectivity === "off", "Connection check",
+    p.connectivity === "off" ? "Off" : "Asks " + (p.connectivityHost || "a web server"),
+    p.nmBlackOps ? BLACK_OPS : "NetworkManager")
+  var id = p.identity
+  item(!!id, !!id && id.mac && id.hostname, "Network identity",
+    !id ? "" : (id.mac ? "Private address per network" : "Real hardware address") + (id.hostname ? "" : " · sends computer name"),
+    p.nmBlackOps ? BLACK_OPS : "NetworkManager")
+  item(p.avahiAnnounces !== null && p.avahiAnnounces !== undefined, p.avahiAnnounces === false, "Local announcements",
+    p.avahiAnnounces ? "Announces this computer on the network" : "Off",
+    p.avahiBlackOps ? BLACK_OPS : "Avahi")
+  item(true, !p.debuginfod, "Debug symbol lookups",
+    p.debuginfod ? "Asks debuginfod.archlinux.org when a program crashes" : "Off", "session")
+
+  var on = items.filter(function(i) { return i.on }).length
+  var n = items.length
+  var managed = items.some(function(i) { return i.f.owner === BLACK_OPS })
+  return check(b, {
+    kind: on === n ? "good" : "info",
+    status: on === 0 ? "Using Arch's defaults" : on === n ? "All " + n + " protections on" : on + " of " + n + " protections on",
+    meta: on === n ? "Nothing more to turn on" : (n - on) + " optional — each has a small cost",
+    facts: items.map(function(i) { return i.f }),
+    note: managed ? "The Black Ops plugin manages some of these. Keepwell shows them but leaves them to it." : "",
+    actions: on === n ? [] : [{ label: "Choose what to turn on…", primary: true, elevated: true }]
   })
 }
 
 var APP_NAMES = { vscode: "VS Code", spotify: "Spotify", discord: "Discord", steam: "Steam" }
 
-function apps(p) {
+function apps(p, net) {
   var b = CATALOG.apps
   var list = p.apps || []
+  var dnt = fact("Do Not Track signal", net && net.doNotTrack ? "Sent to tools that honour it" : "Not set", "session")
+  var dntAction = net && net.doNotTrack ? [] : [{ label: "Turn on Do Not Track" }]
   if (list.length === 0) return check(b, { kind: "good", status: "No known reporting apps installed",
-    meta: "Arch itself sends nothing", facts: [] })
+    meta: "Arch itself sends nothing", facts: [dnt], actions: dntAction })
   var facts = [], on = 0, actions = []
   for (var i = 0; i < list.length; i++) {
     var a = list[i], name = APP_NAMES[a.id] || a.id
@@ -257,7 +311,8 @@ function apps(p) {
   return check(b, { kind: on > 0 ? "attn" : "info",
     status: on > 0 ? plural(on, "installed app sends", "installed apps send") + " usage data"
       : plural(list.length, "installed app may send", "installed apps may send") + " usage data",
-    meta: "Arch itself sends nothing", facts: facts, actions: actions })
+    meta: "Arch itself sends nothing", facts: facts.concat([dnt]), actions: actions.concat(dntAction),
+    note: "Do Not Track is a setting many developer tools read as “don't collect usage data”. It changes nothing for apps that ignore it." })
 }
 
 function media(p) {
@@ -403,8 +458,9 @@ function build(doc, now) {
     upd: function() { return updates(p("updates"), now) },
     fw: function() { return firewall(p("firewall")) },
     leaks: function() { return leaks(p("tools")) },
-    browser: function() { return browser(p("browser")) },
-    apps: function() { return apps(p("apps")) },
+    browser: function() { return browser(p("browser"), p("chromiumPolicy")) },
+    netpriv: function() { return networkPrivacy(p("netPrivacy")) },
+    apps: function() { return apps(p("apps"), p("netPrivacy")) },
     cam: function() { return media(p("media")) },
     traces: function() { return traces(p("traces")) },
     perms: function() { return permissions(p("permissions")) },
@@ -420,7 +476,7 @@ function build(doc, now) {
     var checks = s.checks.map(function(id) {
       if (!probes) return loading(id)
       var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", leaks: "tools",
-        browser: "browser", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
+        browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
         clean: "cleanup", snap: "snapshots", disk: "disk" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
