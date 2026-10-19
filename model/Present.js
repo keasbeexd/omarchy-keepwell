@@ -531,7 +531,8 @@ function cleanup(p) {
   var orphans = p.orphans || { count: 0, bytes: 0 }
   var home = p.homeCache || { bytes: 0, complete: true }
   var total = safe + extraPkgs + removed + (orphans.bytes || 0) + (home.bytes || 0)
-  return check(b, { kind: "info",
+  // A gigabyte or more is worth a look; less is just information.
+  return check(b, { kind: total >= 1e9 ? "attn" : "info",
     status: total > 0 ? "Up to " + bytes(total) + " can be freed" : "Nothing to clean up",
     meta: "App cache " + bytes(home.bytes) + " · package cache " + bytes(safe + extraPkgs + removed) + " · logs " + bytes(p.journalBytes),
     facts: [
@@ -663,13 +664,7 @@ function hero(section, checks) {
   var off = checks.filter(function(c) { return c.kind === "off" }).length
   hero.good = [section.id === "care" ? "Your system is in good shape" : section.name + " looks good",
     "Nothing needs your attention." + (off ? " " + word(off) + (off === 1 ? " optional check is" : " optional checks are") + " off." : "")]
-  if (section.id === "care") {
-    var clean = checks.filter(function(c) { return c.id === "clean" })[0]
-    if (clean && clean.status.indexOf("Up to ") === 0) {
-      hero.good[1] = clean.status.replace("can be freed", "can be freed whenever you like") + "."
-      hero.goodCta = "Review cleanup"
-    }
-  }
+
   return hero
 }
 

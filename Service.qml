@@ -88,6 +88,15 @@ Scope {
     checker.start(argv)
   }
 
+  // Refresh: every quick check again, arch-audit included, however recent
+  // the last result; the footer says when it finished.
+  property bool reportRefresh: false
+  function refreshAll() {
+    say("")
+    reportRefresh = true
+    check(true)
+  }
+
   function accept(text) {
     var parsed
     try { parsed = JSON.parse(text) } catch (e) { return false }
@@ -111,6 +120,11 @@ Scope {
     timeoutMs: 40000
     onFinished: function(ok, text) {
       root.failed = !ok || !root.accept(text)
+      if (root.reportRefresh && !root.queued) {
+        root.reportRefresh = false
+        root.say(root.failed ? "Refresh failed — try again in a moment."
+                 : "All quick checks ran just now (" + Qt.formatTime(new Date(), "HH:mm:ss") + ").")
+      }
       if (root.reportAfterCheck && !root.queued) {
         var c = root.findCheck(root.reportAfterCheck.checkId)
         root.say(root.reportAfterCheck.prefix + (c ? c.title + ": " + c.status + "." : ""))
@@ -763,18 +777,46 @@ Scope {
       item.sections = Qt.binding(function() { return root.sections })
       item.checkedAt = Qt.binding(function() { return root.checkedAt })
       item.checking = Qt.binding(function() { return root.checking })
+      item.checkRequested.connect(function(network) { if (network === true) root.refreshAll(); else root.check(network) })
+      item.actionRequested.connect(function(action, checkId, context) { root.requestAction(action, checkId, context) })
+
+      item.confirmOpen = Qt.binding(function() { return root.confirmOpen })
+      item.confirmPlan = Qt.binding(function() { return root.confirmPlan })
+      item.confirmFailed = Qt.binding(function() { return root.confirmFailed })
+      item.confirmSnapshot = Qt.binding(function() { return root.confirmSnapshot })
+      item.confirmContext = Qt.binding(function() { return root.confirmContext })
+      item.confirmAccepted.connect(root.acceptConfirm)
+      item.confirmCanceled.connect(root.cancelConfirm)
+      item.confirmSnapshotToggled.connect(root.toggleSnapshot)
+      item.confirmOptionToggled.connect(root.toggleOption)
+      item.confirmAllToggled.connect(root.toggleAllOptions)
+
+      item.trashOpen = Qt.binding(function() { return root.trashOpen })
+      item.trashTitle = Qt.binding(function() { return root.trashTitle })
+      item.trashContext = Qt.binding(function() { return root.trashContext })
+      item.trashItems = Qt.binding(function() { return root.trashItems })
+      item.trashFailed = Qt.binding(function() { return root.trashFailed })
+      item.trashBusy = Qt.binding(function() { return trasher.running })
+      item.trashChecked = Qt.binding(function() { return root.trashChecked })
+      item.trashDays = Qt.binding(function() { return root.trashDays })
+      item.trashDayChoices = Qt.binding(function() { return root.trashDayChoices })
+      item.trashToggled.connect(root.toggleTrashItem)
+      item.trashAllToggled.connect(root.toggleAllTrash)
+      item.trashDaysChosen.connect(root.chooseDays)
+      item.trashIgnored.connect(root.ignoreItem)
+      item.trashAccepted.connect(root.confirmTrash)
+      item.trashCanceled.connect(root.cancelTrash)
+
       item.schedules = Qt.binding(function() { return root.schedules })
       item.tools = Qt.binding(function() { return root.doc && root.doc.probes && root.doc.probes.tools ? root.doc.probes.tools : ({}) })
+      item.schedOpen = Qt.binding(function() { return root.schedOpen })
+      item.schedBusy = Qt.binding(function() { return schedWriter.running })
       item.scheduleRequested.connect(root.openSchedule)
       item.runNow.connect(root.runNow)
       item.dismissMissed.connect(root.dismissMissed)
-      item.schedOpen = Qt.binding(function() { return root.schedOpen })
-      item.schedBusy = Qt.binding(function() { return schedWriter.running })
       item.schedSaved.connect(root.saveSchedules)
       item.schedCanceled.connect(function() { root.schedOpen = false })
-      item.trashToggled.connect(root.toggleTrashItem)
-      item.trashAccepted.connect(root.confirmTrash)
-      item.trashCanceled.connect(root.cancelTrash)
+
       if (root.focusCheckId !== "") { item.focusCheck(root.focusCheckId); root.focusCheckId = "" }
       item.show()
     }

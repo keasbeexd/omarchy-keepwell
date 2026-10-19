@@ -52,14 +52,16 @@ Rectangle {
     }
   }
 
+  // Only when there is something to show.
   ActionButton {
     id: button
+    visible: root.worst !== "good"
+    width: visible ? implicitWidth : 0
     anchors.right: parent.right
     anchors.verticalCenter: parent.verticalCenter
-    anchors.rightMargin: Tokens.sp(16)
+    anchors.rightMargin: visible ? Tokens.sp(16) : 0
     primary: true
-    label: root.worst === "good" && root.section.hero && root.section.hero.goodCta
-      ? root.section.hero.goodCta : "Show me"
+    label: "Show me"
     onActivated: root.go()
   }
 }

@@ -214,6 +214,9 @@ Item {
             if (actions.length > 0) root.actionCursor = Math.min(actions.length - 1, root.actionCursor + 1)
           } else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) {
             root.actionCursor = Math.max(-1, root.actionCursor - 1)
+          } else if (event.key === Qt.Key_F5) {
+            root.notice = ""
+            root.checkRequested(true)
           } else if (event.key === Qt.Key_S) {
             root.scheduleRequested()
           } else if (event.key === Qt.Key_R && root.schedules.missed && root.schedules.missed.length) {
