@@ -48,7 +48,10 @@ function check(base, fields) {
   return c
 }
 
-function install(label) { return { label: label, primary: true, elevated: true } }
+// act: an action id in bin/keepwell-run (opens the confirm sheet, then a
+// terminal). launch: a desktop entry to open. run: "network" re-runs checks
+// with arch-audit. None of these: arrives in a later build.
+function install(label, act) { return { label: label, primary: true, elevated: true, act: act } }
 
 // ---------------------------------------------------------------- catalog
 
@@ -102,7 +105,7 @@ function audit(p, net, now) {
   var note = "Checking downloads Arch's public security list from security.archlinux.org."
   if (!p.installed) return check(b, { kind: "off", status: "arch-audit isn't installed",
     meta: "Small, official tool from the Arch repos", note: note,
-    facts: [fact("Installed", "No")], actions: [install("Install arch-audit")] })
+    facts: [fact("Installed", "No")], actions: [install("Install arch-audit", "install-arch-audit")] })
   if (p.error) return check(b, { kind: "attn", status: "Couldn't reach the security tracker",
     meta: "Check your connection, then check again", note: note,
     actions: [{ label: "Check again", primary: true, run: "network" }] })
@@ -135,7 +138,7 @@ function audit(p, net, now) {
     : "No known issues in installed packages"
   return check(b, { kind: kind, status: status, note: note,
     meta: plural(total, "package", "packages") + " flagged · checked just now", facts: facts,
-    actions: total > 0 ? [{ label: "Update system", primary: true, elevated: true }, { label: "Check again", run: "network" }]
+    actions: total > 0 ? [{ label: "Update system", primary: true, elevated: true, act: "update" }, { label: "Check again", run: "network" }]
       : [{ label: "Check again", run: "network" }] })
 }
 
@@ -144,7 +147,7 @@ function antivirus(p, now) {
   var honest = "Antivirus is one layer, not a force field. Updates and the firewall do more of the work."
   if (!p.clamav) return check(b, { kind: "off", status: "Not installed — optional",
     meta: "Useful if you share files with Windows users", note: honest,
-    facts: [fact("ClamAV", "Not installed")], actions: [install("Install ClamAV")] })
+    facts: [fact("ClamAV", "Not installed")], actions: [install("Install ClamAV", "install-clamav")] })
   var age = days(p.definitionsAt, now)
   var auto = p.freshclamEnabled === "enabled"
   var facts = [
@@ -155,8 +158,8 @@ function antivirus(p, now) {
   ]
   var stale = age === null || age > 7
   var actions = []
-  if (!auto) actions.push({ label: "Turn on auto-update", primary: true, elevated: true })
-  if (p.clamtk) actions.push({ label: "Open ClamTK" })
+  if (!auto) actions.push({ label: "Turn on auto-update", primary: true, elevated: true, act: "freshclam-on" })
+  if (age !== null) actions.push({ label: "Scan Downloads", primary: auto, elevated: true, act: "scan-downloads" })
   return check(b, { tool: p.clamtk ? "ClamAV · ClamTK" : "ClamAV",
     kind: stale ? "attn" : "good",
     status: age === null ? "No virus definitions yet" : stale ? "Virus definitions are " + age + " days old" : "Definitions are up to date",
@@ -169,22 +172,23 @@ function updates(p, now) {
   var d = days(p.lastUpgradeAt, now)
   if (d === null) return check(b, { kind: "attn", status: "No recent full update found",
     meta: "Never scheduled — you choose when", facts: [fact("Last update", "Not in the recent log")],
-    actions: [{ label: "Update now", primary: true, elevated: true }] })
+    actions: [{ label: "Update now", primary: true, elevated: true, act: "update" }] })
   return check(b, { kind: d > 14 ? "attn" : "good",
     status: d === 0 ? "Updated today" : "Last updated " + ago(p.lastUpgradeAt, now),
     meta: "Never scheduled — you choose when",
     facts: [fact("Last update", ago(p.lastUpgradeAt, now)), fact("Schedule", "None, by design")],
-    actions: [{ label: "Update now", primary: d > 14, elevated: true }] })
+    actions: [{ label: "Update now", primary: d > 14, elevated: true, act: "update" }] })
 }
 
 function firewall(p) {
   var b = CATALOG.fw
   if (!p.installed) return check(b, { kind: "crit", status: "No firewall installed",
     meta: "UFW is the standard choice", facts: [fact("UFW", "Not installed")],
-    actions: [install("Install UFW")] })
+    actions: [install("Install UFW", "install-ufw")] })
   var on = p.enabled === true && p.unitActive === "active"
   var blocks = p.incoming === "drop" || p.incoming === "reject"
-  var gui = p.gufw ? { label: "Edit rules in GufW", primary: on && blocks } : { label: "Install GufW to edit rules", elevated: true }
+  var gui = p.gufw ? { label: "Edit rules in GufW", primary: on && blocks, launch: "gufw.desktop" }
+    : { label: "Install GufW to edit rules", elevated: true, act: "install-gufw" }
   var facts = [
     fact("Status", on ? "Active" : p.enabled === true ? "Enabled, not running" : "Off"),
     fact("Incoming", p.incoming === "accept" ? "Allow" : p.incoming ? "Deny" : "Unknown"),
@@ -193,20 +197,20 @@ function firewall(p) {
   ]
   if (!on) return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "crit", status: "The firewall is off",
     meta: "Nothing is filtering incoming connections", facts: facts,
-    actions: [{ label: "Turn on", primary: true, elevated: true }, gui] })
+    actions: [{ label: "Turn on", primary: true, elevated: true, act: "ufw-on" }, gui] })
   if (!blocks) return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "attn", status: "On, but incoming connections are allowed",
     meta: "The usual default is to deny incoming", facts: facts,
-    actions: [{ label: "Deny incoming…", primary: true, elevated: true }, gui] })
+    actions: [{ label: "Deny incoming…", primary: true, elevated: true, act: "ufw-deny-incoming" }, gui] })
   return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "good", status: "On — blocks incoming, allows outgoing",
     meta: plural(p.rules, "rule", "rules") + (p.gufw ? " · edit in GufW" : ""), facts: facts,
-    actions: [gui, { label: "Turn off…", elevated: true }] })
+    actions: [gui, { label: "Turn off…", elevated: true, act: "ufw-off" }] })
 }
 
 function leaks(tools) {
   var b = CATALOG.leaks
   if (!tools.gitleaks) return check(b, { kind: "off", status: "Not set up — optional",
     meta: "Finds keys and passwords committed to git", facts: [fact("Installed", "No")],
-    actions: [install("Install gitleaks")] })
+    actions: [install("Install gitleaks", "install-gitleaks")] })
   return check(b, { kind: "off", status: "Ready — choose a folder to scan",
     meta: "Read-only report", facts: [fact("Installed", "Yes"), fact("Folder", "Not chosen")],
     actions: [{ label: "Choose a folder…", primary: true }] })
@@ -301,18 +305,17 @@ function apps(p, net) {
     var a = list[i], name = APP_NAMES[a.id] || a.id
     if (a.id === "vscode") {
       var level = a.state === "off" ? "Telemetry off" : a.state === null ? "Settings unreadable" : "Telemetry on"
-      if (a.state !== "off") { on++; actions.push({ label: "Open VS Code settings", primary: actions.length === 0 }) }
+      if (a.state !== "off") { on++; actions.push({ label: "Open VS Code", primary: actions.length === 0, launch: "code.desktop" }) }
       facts.push(fact(name, level, "its own settings"))
     } else {
       facts.push(fact(name, "Can't be read here", "its own settings"))
-      actions.push({ label: "How to opt out of " + name })
     }
   }
   return check(b, { kind: on > 0 ? "attn" : "info",
     status: on > 0 ? plural(on, "installed app sends", "installed apps send") + " usage data"
       : plural(list.length, "installed app may send", "installed apps may send") + " usage data",
     meta: "Arch itself sends nothing", facts: facts.concat([dnt]), actions: actions.concat(dntAction),
-    note: "Do Not Track is a setting many developer tools read as “don't collect usage data”. It changes nothing for apps that ignore it." })
+    note: "Apps whose setting can't be read here usually have a usage-data or privacy option in their own settings. Do Not Track is a signal many developer tools read as “don't collect usage data”; apps that ignore it are unaffected." })
 }
 
 function media(p) {
@@ -356,10 +359,10 @@ function permissions(p) {
   if (!p.flatseal) return check(b, { kind: "off", status: "Flatseal isn't installed",
     meta: plural(p.apps, "Flatpak app", "Flatpak apps") + " could be reviewed",
     facts: [fact("Flatpak apps", String(p.apps)), fact("Flatseal", "Not installed")],
-    actions: [install("Install Flatseal")] })
+    actions: [install("Install Flatseal", "install-flatseal")] })
   return check(b, { kind: "good", status: "Flatseal is ready",
     meta: plural(p.apps, "Flatpak app", "Flatpak apps"),
-    facts: [fact("Flatpak apps", String(p.apps))], actions: [{ label: "Open Flatseal", primary: true }] })
+    facts: [fact("Flatpak apps", String(p.apps))], actions: [{ label: "Open Flatseal", primary: true, launch: "com.github.tchx84.Flatseal.desktop" }] })
 }
 
 // ---------------------------------------------------------------- system care
@@ -381,7 +384,7 @@ function cleanup(p) {
       fact("App cache", bytes(home.bytes) + (home.complete ? "" : "+"), "Review each"),
       fact("System logs", bytes(p.journalBytes), "journal")
     ],
-    actions: [{ label: "Review cleanup…", primary: true }, { label: "Take a snapshot first", elevated: true }] })
+    actions: [{ label: "Review cleanup…", primary: true }] })
 }
 
 function unclaimed() {
@@ -399,7 +402,7 @@ function snapshots(p) {
     meta: "Snapshot list needs admin rights to read",
     facts: [fact("Snapper", "Set up for the system"), fact("Boot menu", sync ? "In sync" : "Sync off", "limine-snapper-sync"),
             fact("Snapshots", "Ask the Snapshots plugin", "")],
-    actions: [{ label: "Take snapshot now", primary: true, elevated: true }, { label: "Manage in Snapshots plugin ↗" }] })
+    actions: [{ label: "Take snapshot now", primary: true, elevated: true, act: "snapshot" }] })
 }
 
 function disk(p) {
@@ -409,7 +412,8 @@ function disk(p) {
   return check(b, { kind: pct >= 90 ? "crit" : pct >= 80 ? "attn" : "good",
     status: pct + "% used — " + bytes(p.free) + " free", meta: "/ · " + bytes(p.size),
     facts: [fact("Used", bytes(p.used) + " of " + bytes(p.size)), fact("Free", bytes(p.free))],
-    actions: [p.baobab ? { label: "Open Disk Usage Analyzer", primary: true } : install("Install Disk Usage Analyzer")] })
+    actions: [p.baobab ? { label: "Open Disk Usage Analyzer", primary: true, launch: "org.gnome.baobab.desktop" }
+      : install("Install Disk Usage Analyzer", "install-baobab")] })
 }
 
 function timers() {
