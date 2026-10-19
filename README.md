@@ -8,10 +8,11 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.3.0.** Every check reads your real system. Installs, firewall,
-> updates, snapshots and cleanup work through a visible terminal, and caches
-> and activity traces move to Trash (below). The privacy settings are shown
-> and arrive in the next build (pressing one says so).
+> **Status: 0.4.0.** Every check reads your real system, and every action
+> works: installs, firewall, updates, snapshots, cleanup and the privacy
+> settings through a visible terminal, caches and activity traces by moving
+> them to the Trash (below). Scheduled background checks and the
+> unclaimed-files finder come later.
 
 ## What it looks like
 
@@ -111,9 +112,10 @@ the window. Nothing else in Keepwell makes a network request.
 
 ### What it writes
 
-Keepwell creates no files of its own. Changes happen only through the
-actions below: in a terminal after you confirm, or by moving what you tick
-to the Trash.
+Keepwell keeps no state files. Changes happen only through the actions
+below: in a terminal after you confirm, or by moving what you tick to the
+Trash. The privacy settings are the only files Keepwell itself creates;
+they are listed under [Removing](#removing).
 
 ## Actions
 
@@ -152,6 +154,37 @@ The cleanup sheet measures each option first (`paccache -d`, `pacman -Qtdq`,
 `journalctl --disk-usage`) and ticks only the safe ones; the commands update
 as you tick, and the terminal runs exactly the ticked set.
 
+### Privacy settings
+
+**Network privacy → Choose what to turn on** opens one sheet for seven
+settings. Each shows its cost; ticking turns it on, unticking undoes it, and
+the commands are exactly the difference. Keepwell only ever adds or removes
+its own marked lines and files. A setting Black Ops applied, or one you set
+by hand some other way, is not offered.
+
+| Setting | What Keepwell writes | Then runs |
+|---|---|---|
+| Block telemetry hosts | a block between `# BEGIN keepwell…` and `# END keepwell` in `/etc/hosts` (the 14 hosts to `0.0.0.0` and `::`) | `sudo resolvectl flush-caches` |
+| No backup DNS servers | `/etc/systemd/resolved.conf.d/90-keepwell-no-fallback.conf` (`FallbackDNS=`) | `sudo systemctl try-reload-or-restart systemd-resolved` |
+| No connection check | `/etc/NetworkManager/conf.d/90-keepwell-connectivity.conf` (`enabled=false`) | `sudo systemctl reload NetworkManager` |
+| Private network identity | `/etc/NetworkManager/conf.d/90-keepwell-identity.conf` (stable per-network MAC, no DHCP hostname, IPv6 privacy addresses) | `sudo systemctl reload NetworkManager` |
+| Don't announce this computer | in `/etc/avahi/avahi-daemon.conf`'s `[publish]` section: a `# keepwell:` marker line and `disable-publishing=yes` below it (an existing uncommented `disable-publishing` line is kept, commented as `#keepwell-was:`) | `sudo systemctl try-restart avahi-daemon` |
+| No debug symbol lookups | `~/.config/uwsm/env.d/90-keepwell-debuginfod` (`export DEBUGINFOD_URLS=`) | `systemctl --user set-environment DEBUGINFOD_URLS=` |
+| Send Do Not Track | `~/.config/uwsm/env.d/90-keepwell-do-not-track` (`export DO_NOT_TRACK=1`) | `systemctl --user set-environment DO_NOT_TRACK=1` |
+
+**Browser telemetry → Apply privacy policy** installs
+`/etc/chromium/policies/managed/keepwell-privacy.json` with the 14 policies
+(it is shown in full first); **Remove privacy policy** deletes it.
+
+Files under `/etc` are written with `sudo install … /dev/stdin <path>`, so
+their contents go through standard input, never the command line, and are
+shown before you press Enter. `/etc/hosts` and `avahi-daemon.conf`, which
+belong to other packages, are rewritten through a fresh sibling file and a
+rename; the dialog shows the exact change as a diff, and after the rename
+Keepwell reads the file back and puts the original bytes back if it doesn't
+match. Undoing removes exactly Keepwell's lines and restores the file as it
+was.
+
 ### Moving things to Trash
 
 App caches (folders directly inside `~/.cache`) and activity traces (the
@@ -175,15 +208,35 @@ after you confirm.
 omarchy plugin remove keasbeexd.keepwell
 ```
 
-This removes the plugin directory and its bar entry. Keepwell creates no other
-files, so nothing is left behind.
+This removes the plugin directory and its bar entry. Keepwell keeps no state
+or cache files of its own.
+
+**Privacy settings you turned on stay in effect after removal.** Untick them
+in Keepwell first (Network privacy → Change settings, Browser telemetry →
+Remove privacy policy) to undo them cleanly. If the plugin is already gone,
+these are everything Keepwell can have written:
+
+| File | Undo by hand |
+|---|---|
+| `/etc/hosts` block from `# BEGIN keepwell…` to `# END keepwell` | delete those lines with `sudoedit /etc/hosts` |
+| `/etc/systemd/resolved.conf.d/90-keepwell-no-fallback.conf` | `sudo rm` it, then `sudo systemctl restart systemd-resolved` |
+| `/etc/NetworkManager/conf.d/90-keepwell-connectivity.conf`, `90-keepwell-identity.conf` | `sudo rm` them, then `sudo systemctl reload NetworkManager` |
+| `/etc/avahi/avahi-daemon.conf`: each `# keepwell:` line and the line after it; a `#keepwell-was: ` prefix | `sudoedit` the file: delete those pairs, strip the prefix, then `sudo systemctl try-restart avahi-daemon` |
+| `/etc/chromium/policies/managed/keepwell-privacy.json` | `sudo rm` it |
+| `~/.config/uwsm/env.d/90-keepwell-debuginfod`, `90-keepwell-do-not-track` | `rm` them; they stop applying at the next login |
+
+Packages Keepwell installed for you (arch-audit, ClamAV, gitleaks, GufW,
+Flatseal, Disk Usage Analyzer, UFW) are ordinary packages and stay installed;
+ClamAV's `clamav-freshclam` service stays enabled if you turned it on. Items
+moved to the Trash stay there until you empty it.
 
 ## Credits
 
-The list of telemetry hosts and the set of Chromium privacy policies come from
+The list of telemetry hosts, the set of Chromium privacy policies and the
+network privacy settings are adapted from
 [omarchy-black-ops](https://github.com/brightwalker25/omarchy-black-ops) by
 brightwalker25 (MIT). Where Black Ops has applied a setting, Keepwell shows it
-as "managed by Black Ops" and leaves it alone.
+as "managed by Black Ops" and never changes it.
 
 ## Licence
 

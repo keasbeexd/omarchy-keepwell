@@ -205,15 +205,17 @@ Scope {
     }
     for (var i = 0; i < p.steps.length; i++) {
       var s = p.steps[i]
-      if (!s || typeof s.say !== "string" || typeof s.cmd !== "string" || s.cmd.length > 2000) return false
+      if (!s || typeof s.say !== "string" || typeof s.cmd !== "string" || s.cmd.length > 2000
+          || (s.content !== undefined && (typeof s.content !== "string" || s.content.length > 8000))
+          || (s.diff !== undefined && (typeof s.diff !== "string" || s.diff.length > 8000))) return false
     }
     return true
   }
 
   BoundedProcess {
     id: planner
-    maxBytes: 32 * 1024
-    timeoutMs: 5000
+    maxBytes: 64 * 1024
+    timeoutMs: 15000
     onFinished: function(ok, text) {
       if (root.planDirty) { root.planDirty = false; root.fetchPlan(); return }
       var p = null

@@ -23,6 +23,7 @@ arguments, in this visible terminal, so you see each command and type your
 password here — never in Keepwell.
 """
 
+import difflib
 import json
 import re
 import select
@@ -118,11 +119,14 @@ def orphans():
     return [n for n in out.split() if re.fullmatch(r"[A-Za-z0-9@._+][A-Za-z0-9@._+-]{0,127}", n)][:50]
 
 
-def step(say, argv, root=False, password=False):
+def step(say, argv, root=False, password=False, stdin=None, verify=None):
     """One command. root: run through sudo. password: the command may ask
-    for your password itself (Omarchy commands that call sudo)."""
+    for your password itself (Omarchy commands that call sudo). stdin: bytes
+    fed to the command (file contents; shown in full before anything runs).
+    verify: (path, expected_bytes, rollback_steps) checked after this step;
+    on a mismatch the rollback steps run at once."""
     full = [SUDO, "--"] + argv if root else argv
-    return {"say": say, "argv": full, "root": root or password}
+    return {"say": say, "argv": full, "root": root or password, "stdin": stdin, "verify": verify, "diff": None}
 
 
 def pkg_add(*names):
@@ -201,6 +205,18 @@ ACTIONS = {
         title="Clean up",
         summary="Removes what you tick. Package files are deleted outright; you can download them again any time.",
         system=True, options=lambda: _cleanup_options(), steps=lambda o: _cleanup_steps(o)),
+    "privacy": dict(
+        title="Network privacy settings",
+        summary="Tick a setting to turn it on, untick to undo it. Each shows its cost. Keepwell only adds or removes its own marked lines and files.",
+        system=False, options=lambda: _privacy_options(), steps=lambda o: _privacy_steps(o)),
+    "chromium-policy": dict(
+        title="Apply Chromium privacy policy",
+        summary="Installs a policy file Chromium reads at start: 14 settings that cut what it sends, none of which lowers security. Casting from Chromium stops working.",
+        system=False, steps=lambda o: _policy_on()),
+    "chromium-policy-off": dict(
+        title="Remove Chromium privacy policy",
+        summary="Removes the policy file Keepwell installed. Chromium goes back to your profile's settings at its next start.",
+        system=False, steps=lambda o: _policy_off()),
     "snapshot": dict(
         title="Take a snapshot",
         summary="Creates a restore point of the system (not your home folder), which you can boot into from the boot menu.",
@@ -263,6 +279,323 @@ def _cleanup_steps(chosen):
     return steps
 
 
+# ---------------------------------------------------------------- privacy
+# Settings adapted from omarchy-black-ops by brightwalker25 (MIT). Keepwell
+# writes only its own marked block or its own files, and undoes only those;
+# a setting Black Ops or you made is reported and left alone.
+
+MARK = "keepwell"
+HOSTS = "/etc/hosts"
+HOSTS_BEGIN = "# BEGIN keepwell: telemetry hosts sunk by the Keepwell plugin; untick in Keepwell to remove"
+HOSTS_END = "# END keepwell"
+TELEMETRY_HOSTS = (
+    "http-intake.logs.us5.datadoghq.com", "o1158394.ingest.us.sentry.io",
+    "o33249.ingest.us.sentry.io", "telemetry.1passwordservices.com",
+    "core-sentry.1passwordservices.com", "usage-ping.brave.com",
+    "star-randsrv.bsg.brave.com", "incoming.telemetry.mozilla.org",
+    "google-analytics.com", "www.google-analytics.com", "ssl.google-analytics.com",
+    "region1.google-analytics.com", "analytics.google.com", "region1.analytics.google.com",
+)
+RESOLVED_FILE = "/etc/systemd/resolved.conf.d/90-keepwell-no-fallback.conf"
+NM_CONNECTIVITY = "/etc/NetworkManager/conf.d/90-keepwell-connectivity.conf"
+NM_IDENTITY = "/etc/NetworkManager/conf.d/90-keepwell-identity.conf"
+AVAHI = "/etc/avahi/avahi-daemon.conf"
+POLICY = "/etc/chromium/policies/managed/keepwell-privacy.json"
+ENV_DIR = os.path.join(HOME, ".config", "uwsm", "env.d")
+ENV_DEBUGINFOD = os.path.join(ENV_DIR, "90-keepwell-debuginfod")
+ENV_DNT = os.path.join(ENV_DIR, "90-keepwell-do-not-track")
+HEADER = "# Written by the Keepwell plugin; untick the setting in Keepwell to remove it.\n"
+
+CHROMIUM_POLICIES = {
+    "SearchSuggestEnabled": False, "NetworkPredictionOptions": 2,
+    "AlternateErrorPagesEnabled": False, "SpellCheckServiceEnabled": False,
+    "MetricsReportingEnabled": False, "UrlKeyedAnonymizedDataCollectionEnabled": False,
+    "BlockThirdPartyCookies": True, "WebRtcIPHandling": "default_public_interface_only",
+    "PrivacySandboxAdTopicsEnabled": False, "PrivacySandboxSiteEnabledAdsEnabled": False,
+    "PrivacySandboxAdMeasurementEnabled": False, "PasswordLeakDetectionEnabled": False,
+    "BackgroundModeEnabled": False, "EnableMediaRouter": False,
+}
+
+
+def _active(unit):
+    return capture(["/usr/bin/systemctl", "is-active", "--", unit], timeout=3, cap=256).strip() == "active"
+
+
+def _write_root(say, path, content):
+    return step(say, ["/usr/bin/install", "-D", "-m", "0644", "-o", "root", "-g", "root", "-T", "/dev/stdin", path],
+                root=True, stdin=content.encode())
+
+
+def _remove_root(say, path):
+    return step(say, ["/usr/bin/rm", "-f", "--", path], root=True)
+
+
+def _replace_root(say, path, new, old):
+    """Rewrite a file we don't own through a fresh sibling and a rename, then
+    check it reads back exactly; if not, the original bytes go back."""
+    tmp = os.path.join(os.path.dirname(path), "." + os.path.basename(path) + ".keepwell-new")
+    def pair(data):
+        return [step("Write the new " + path, ["/usr/bin/install", "-m", "0644", "-o", "root", "-g", "root",
+                                               "-T", "/dev/stdin", tmp], root=True, stdin=data),
+                step("Put it in place", ["/usr/bin/mv", "-f", "-T", "--", tmp, path], root=True)]
+    write, move = pair(new.encode())
+    write["say"] = say
+    # Shown instead of the whole file: the exact change, with a line of the
+    # untouched text around it.
+    write["diff"] = "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                                                 fromfile=path, tofile=path + " (new)", n=1))
+    move["verify"] = (path, new.encode(), pair(old.encode()))
+    return [write, move]
+
+
+def _hosts_text():
+    raw = read_root_file(HOSTS)
+    return raw.decode("utf-8", "replace") if raw is not None else None
+
+
+def _hosts_state(text_value):
+    if text_value is None:
+        return "na"
+    if "# BEGIN black-ops" in text_value:
+        return "blackops"
+    begins = text_value.count(HOSTS_BEGIN)
+    ends = text_value.count(HOSTS_END + "\n") + (1 if text_value.endswith(HOSTS_END) else 0)
+    if begins == 1 and ends == 1:
+        return "ours"
+    if begins or ends:
+        return "broken"          # a half-removed block: refuse to touch it
+    return "off"
+
+
+def _hosts_with(text_value):
+    # A file without a final newline gets one; undo keeps it (harmless).
+    body = text_value if text_value.endswith("\n") or not text_value else text_value + "\n"
+    block = [HOSTS_BEGIN] + ["%s %s" % (addr, h) for h in TELEMETRY_HOSTS for addr in ("0.0.0.0", "::")] + [HOSTS_END]
+    return body + "\n".join(block) + "\n"
+
+
+def _hosts_without(text_value):
+    out, inside = [], False
+    for line in text_value.splitlines(keepends=True):
+        if line.rstrip("\n") == HOSTS_BEGIN:
+            inside = True
+            continue
+        if inside and line.rstrip("\n") == HOSTS_END:
+            inside = False
+            continue
+        if not inside:
+            out.append(line)
+    return "".join(out)
+
+
+# Avahi's parser has no trailing comments, so each marker is a line of its
+# own above the line it marks.
+AVAHI_MARK = "# keepwell: the next line was added by the Keepwell plugin"
+AVAHI_ON = "disable-publishing=yes"
+AVAHI_WAS = "#keepwell-was: "
+AVAHI_SECTION_MARK = "# keepwell: the next section was added by the Keepwell plugin"
+
+
+def _avahi_state(text_value):
+    if text_value is None or not _active("avahi-daemon.service"):
+        return "na"
+    if "black-ops" in text_value:
+        return "blackops"
+    if AVAHI_MARK in text_value:
+        return "ours"
+    section = ""
+    for line in text_value.splitlines():
+        t = line.strip()
+        if t.startswith("[") and "]" in t:
+            section = t[1:t.index("]")]
+        elif section == "publish" and re.fullmatch(r"disable-publishing\s*=\s*yes", t):
+            return "other"
+    return "off"
+
+
+def _avahi_with(text_value):
+    out, section, done = [], "", False
+    for line in text_value.splitlines(keepends=True):
+        t = line.strip()
+        if t.startswith("[") and "]" in t:
+            section = t[1:t.index("]")]
+        if not done and section == "publish" and re.fullmatch(r"#?\s*disable-publishing\s*=.*", t):
+            out += [line if t.startswith("#") else AVAHI_WAS + line, AVAHI_MARK + "\n", AVAHI_ON + "\n"]
+            done = True
+            continue
+        out.append(line)
+    if not done:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        out += [AVAHI_SECTION_MARK + "\n", "[publish]\n", AVAHI_MARK + "\n", AVAHI_ON + "\n"]
+    return "".join(out)
+
+
+def _avahi_without(text_value):
+    """Exactly our lines out: a marker and the one line after it, and a
+    line we commented out put back."""
+    lines = text_value.splitlines(keepends=True)
+    out, skip = [], 0
+    for i, line in enumerate(lines):
+        if skip:
+            skip -= 1
+            continue
+        bare = line.rstrip("\n")
+        nxt = lines[i + 1].rstrip("\n") if i + 1 < len(lines) else None
+        if bare == AVAHI_MARK and nxt == AVAHI_ON:
+            skip = 1
+            continue
+        if bare == AVAHI_SECTION_MARK and nxt == "[publish]":
+            skip = 1
+            continue
+        out.append(line[len(AVAHI_WAS):] if line.startswith(AVAHI_WAS) else line)
+    return "".join(out)
+
+
+def _session_env(name):
+    for line in capture(["/usr/bin/systemctl", "--user", "show-environment"], timeout=3).splitlines():
+        if line.startswith(name + "="):
+            return line[len(name) + 1:].strip("$'\" ")
+    return None
+
+
+def _privacy_state():
+    """id -> (state, label, cost). state: ours | off | other | blackops | na | broken."""
+    st = {}
+    hosts = _hosts_text()
+    st["hosts"] = (_hosts_state(hosts), "Block telemetry hosts",
+                   "14 analytics and crash-report servers · sites that use Google Analytics stop counting your visits; nothing else changes")
+    if not _active("systemd-resolved.service"):
+        fb = "na"
+    elif os.path.exists(RESOLVED_FILE):
+        fb = "ours"
+    elif os.path.exists("/etc/systemd/resolved.conf.d/no-fallback.conf"):
+        fb = "blackops"
+    else:
+        cfg = capture(["/usr/bin/systemd-analyze", "cat-config", "systemd/resolved.conf"], timeout=4)
+        vals = re.findall(r"(?m)^\s*FallbackDNS\s*=(.*)$", cfg)
+        fb = "other" if vals and not vals[-1].strip() else "off"
+    st["fallback"] = (fb, "No backup DNS servers",
+                      "if your network's DNS stops answering, names stop resolving instead of quietly asking Quad9, Cloudflare or Google")
+    nm = _active("NetworkManager.service")
+    bo_nm = any(os.path.exists("/etc/NetworkManager/conf.d/" + n)
+                for n in ("90-black-ops-identity.conf", "90-black-ops-connectivity.conf"))
+    st["connectivity"] = ("na" if not nm else "ours" if os.path.exists(NM_CONNECTIVITY) else "blackops" if bo_nm else "off",
+                          "No connection check",
+                          "NetworkManager stops asking ping.archlinux.org; Wi-Fi sign-in pages (hotels, cafés) won't open by themselves")
+    st["identity"] = ("na" if not nm else "ours" if os.path.exists(NM_IDENTITY) else "blackops" if bo_nm else "off",
+                      "Private network identity",
+                      "a different hardware address for each network and no computer name sent; takes effect when you next connect")
+    avahi = read_root_file(AVAHI, 256 * 1024)
+    st["avahi"] = (_avahi_state(avahi.decode("utf-8", "replace") if avahi is not None else None),
+                   "Don't announce this computer",
+                   "other devices stop seeing this computer's name on the local network; printers and sharing you start still work")
+    urls = _session_env("DEBUGINFOD_URLS")
+    st["debuginfod"] = ("ours" if os.path.exists(ENV_DEBUGINFOD) else "other" if urls == "" else "off",
+                        "No debug symbol lookups",
+                        "crash reports and debuggers stop downloading symbols from debuginfod.archlinux.org; fully from next login")
+    dnt = _session_env("DO_NOT_TRACK")
+    st["dnt"] = ("ours" if os.path.exists(ENV_DNT) else "other" if dnt == "1" else "off",
+                 "Send Do Not Track to apps",
+                 "sets DO_NOT_TRACK=1 for apps started from now on; tools that honour it stop sending usage data")
+    return st
+
+
+def _privacy_options():
+    opts = []
+    for key, (state, label, cost) in _privacy_state().items():
+        if state in ("ours", "off"):
+            opts.append(dict(id=key, label=label, hint=cost, default=state == "ours"))
+    return opts
+
+
+def _privacy_steps(chosen):
+    st = _privacy_state()
+    steps = []
+
+    def wants(key):
+        state = st[key][0]
+        if state not in ("ours", "off"):
+            return None
+        on = key in chosen
+        return None if on == (state == "ours") else on
+
+    w = wants("hosts")
+    if w is not None:
+        text_value = _hosts_text()
+        new = _hosts_with(text_value) if w else _hosts_without(text_value)
+        steps += _replace_root("Add the telemetry block to /etc/hosts" if w else "Take the Keepwell block out of /etc/hosts",
+                               HOSTS, new, text_value)
+        steps.append(step("Forget cached lookups", ["/usr/bin/resolvectl", "flush-caches"], root=True))
+
+    w = wants("fallback")
+    if w is not None:
+        steps.append(_write_root("Turn off backup DNS servers", RESOLVED_FILE,
+                                 HEADER + "[Resolve]\nFallbackDNS=\n") if w
+                     else _remove_root("Remove Keepwell's DNS setting", RESOLVED_FILE))
+        steps.append(step("Reload the DNS resolver", ["/usr/bin/systemctl", "try-reload-or-restart", "systemd-resolved.service"], root=True))
+
+    nm_changed = False
+    w = wants("connectivity")
+    if w is not None:
+        nm_changed = True
+        steps.append(_write_root("Turn off the connection check", NM_CONNECTIVITY,
+                                 HEADER + "[connectivity]\nenabled=false\n") if w
+                     else _remove_root("Remove Keepwell's connection-check setting", NM_CONNECTIVITY))
+    w = wants("identity")
+    if w is not None:
+        nm_changed = True
+        steps.append(_write_root("Use a private identity on every network", NM_IDENTITY,
+                                 HEADER + "[connection]\nipv4.dhcp-send-hostname=0\nipv6.dhcp-send-hostname=0\n"
+                                 "wifi.cloned-mac-address=stable\nethernet.cloned-mac-address=stable\nipv6.ip6-privacy=2\n") if w
+                     else _remove_root("Remove Keepwell's network identity setting", NM_IDENTITY))
+    if nm_changed:
+        steps.append(step("Reload NetworkManager's settings", ["/usr/bin/systemctl", "reload", "NetworkManager.service"], root=True))
+
+    w = wants("avahi")
+    if w is not None:
+        old = read_root_file(AVAHI, 256 * 1024).decode("utf-8", "replace")
+        new = _avahi_with(old) if w else _avahi_without(old)
+        steps += _replace_root("Stop announcing this computer" if w else "Take Keepwell's line out of Avahi's settings",
+                               AVAHI, new, old)
+        steps.append(step("Restart Avahi", ["/usr/bin/systemctl", "try-restart", "avahi-daemon.service"], root=True))
+
+    w = wants("debuginfod")
+    if w is not None:
+        if w:
+            steps.append(step("Turn off debug symbol lookups for new sessions",
+                              ["/usr/bin/install", "-D", "-m", "0644", "-T", "/dev/stdin", ENV_DEBUGINFOD],
+                              stdin=(HEADER + "export DEBUGINFOD_URLS=\n").encode()))
+            steps.append(step("…and for apps started from now on",
+                              ["/usr/bin/systemctl", "--user", "set-environment", "DEBUGINFOD_URLS="]))
+        else:
+            steps.append(step("Remove Keepwell's debug symbol setting", ["/usr/bin/rm", "-f", "--", ENV_DEBUGINFOD]))
+            steps.append(step("…and stop applying it to apps started from now on",
+                              ["/usr/bin/systemctl", "--user", "unset-environment", "DEBUGINFOD_URLS"]))
+
+    w = wants("dnt")
+    if w is not None:
+        if w:
+            steps.append(step("Send Do Not Track in new sessions",
+                              ["/usr/bin/install", "-D", "-m", "0644", "-T", "/dev/stdin", ENV_DNT],
+                              stdin=(HEADER + "export DO_NOT_TRACK=1\n").encode()))
+            steps.append(step("…and to apps started from now on",
+                              ["/usr/bin/systemctl", "--user", "set-environment", "DO_NOT_TRACK=1"]))
+        else:
+            steps.append(step("Remove Keepwell's Do Not Track setting", ["/usr/bin/rm", "-f", "--", ENV_DNT]))
+            steps.append(step("…and stop sending it to apps started from now on",
+                              ["/usr/bin/systemctl", "--user", "unset-environment", "DO_NOT_TRACK"]))
+    return steps
+
+
+def _policy_on():
+    return [_write_root("Install the privacy policy", POLICY, json.dumps(CHROMIUM_POLICIES, indent=2) + "\n")]
+
+
+def _policy_off():
+    return [_remove_root("Remove Keepwell's privacy policy", POLICY)] if os.path.exists(POLICY) else []
+
+
 def _snapshot():
     return step("Create a system snapshot", [OMARCHY, "snapshot", "create"], password=True)
 
@@ -275,15 +608,18 @@ def plan(action_id, snapshot, chosen=None):
         chosen = {o["id"] for o in options if o["default"]}
     chosen = set(chosen) & ids
     steps = a["steps"](chosen)
-    if snapshot and a["system"] and steps:
+    if snapshot and a.get("system") and steps:
         steps = [_snapshot()] + steps
     return {
         "id": action_id, "title": a["title"], "summary": a["summary"],
         "snapshotOffered": a["system"],
         "options": [{"id": o["id"], "label": o["label"], "hint": o["hint"], "checked": o["id"] in chosen}
                     for o in options],
-        "steps": [{"say": s["say"], "cmd": shlex.join(s["argv"]), "root": s["root"]} for s in steps],
-        "_argv": [s["argv"] for s in steps],
+        "steps": [dict({"say": s["say"], "cmd": shlex.join(s["argv"]), "root": s["root"]},
+                       **({"diff": s["diff"]} if s["diff"] is not None
+                          else {"content": s["stdin"].decode("utf-8", "replace")} if s["stdin"] is not None else {}))
+                  for s in steps],
+        "_steps": steps,
     }
 
 
@@ -300,6 +636,48 @@ def _trusted(program):
     except OSError:
         return False
     return stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o022
+
+
+def run_step(raw):
+    argv = raw["argv"]
+    program = argv[2] if argv[0] == SUDO else argv[0]
+    if not _trusted(argv[0]) or not _trusted(program):
+        print(f"Stopped: {program} is missing or not a root-owned system program.")
+        return 2
+    try:
+        if raw["stdin"] is None:
+            return subprocess.call(argv, env=ENV)
+        proc = subprocess.Popen(argv, env=ENV, stdin=subprocess.PIPE)
+        proc.communicate(raw["stdin"])
+        return proc.returncode
+    except KeyboardInterrupt:
+        return 130
+    except OSError as e:
+        print(f"Couldn't start {argv[0]}: {e.strerror}")
+        return 127
+
+
+def read_root_file(path, cap=1 << 20):
+    """Bytes of a file in a root-owned directory, without following a
+    symlink at the end, or None."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            return None
+        os.set_blocking(fd, True)
+        data = b""
+        while len(data) <= cap:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        return data if len(data) <= cap else None
+    finally:
+        os.close(fd)
 
 
 def wait_enter(prompt):
@@ -323,23 +701,29 @@ def apply(action_id, snapshot, chosen=None):
     for n, s in enumerate(p["steps"], 1):
         print(f"  {n}. {s['say']}")
         print(f"     {DIM}${RESET} {s['cmd']}")
+        if "diff" in s:
+            print(f"     {DIM}changing only these lines (+ added, - removed):{RESET}")
+            for line in s["diff"].splitlines()[2:]:
+                print(f"     {DIM}│{RESET} {line}")
+        elif "content" in s:
+            print(f"     {DIM}with these contents:{RESET}")
+            for line in s["content"].splitlines() or [""]:
+                print(f"     {DIM}│{RESET} {line}")
     if any(s["root"] for s in p["steps"]):
         print(f"\n{DIM}Steps marked with sudo or that install packages will ask for your password here.{RESET}")
     if not wait_enter(f"\n{BOLD}Press Enter to run them{RESET}, or close this window to cancel. "):
         return 130
-    for n, (s, argv) in enumerate(zip(p["steps"], p["_argv"]), 1):
+    for n, (s, raw) in enumerate(zip(p["steps"], p["_steps"]), 1):
         print(f"\n{BOLD}[{n}/{len(p['steps'])}] {s['say']}{RESET}")
-        if not _trusted(argv[0]):
-            print(f"Stopped: {argv[0]} is missing or not a root-owned system program. Nothing from here on was run.")
-            wait_enter("\nPress Enter to close and return to Keepwell. ")
-            return 2
-        try:
-            rc = subprocess.call(argv, env=ENV)
-        except KeyboardInterrupt:
-            rc = 130
-        except OSError as e:
-            print(f"Couldn't start {argv[0]}: {e.strerror}")
-            rc = 127
+        rc = run_step(raw)
+        if rc == 0 and raw["verify"]:
+            path, expected, rollback = raw["verify"]
+            if read_root_file(path) != expected:
+                print(f"{BOLD}{path} doesn't hold what was written.{RESET} Putting the original back:")
+                for r in rollback:
+                    print(f"  $ {shlex.join(r['argv'])}")
+                    run_step(r)
+                rc = 3
         if rc != 0:
             print(f"\n{BOLD}Step {n} did not finish (exit {rc}).{RESET} Nothing after it was run.")
             wait_enter("\nPress Enter to close and return to Keepwell. ")
@@ -481,7 +865,7 @@ def main():
             return 2
     if args[0] == "plan":
         p = plan(args[1], snapshot, chosen)
-        del p["_argv"]
+        del p["_steps"]
         sys.stdout.write(json.dumps(p, separators=(",", ":")))
         return 0
     signal.signal(signal.SIGINT, signal.default_int_handler)

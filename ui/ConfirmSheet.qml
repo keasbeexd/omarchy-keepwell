@@ -37,7 +37,18 @@ Item {
   // The cursor starts on "Open terminal" once the first plan (and so the
   // number of options) is known; later plans keep it where it is.
   property bool _placed: false
-  onOpenedChanged: if (opened) _placed = false
+  onOpenedChanged: if (opened) { _placed = false; flick.contentY = 0 }
+  onCursorChanged: follow()
+
+  // Keep the option under the keyboard cursor in view.
+  function follow() {
+    var row = optionRows.itemAt(cursor)
+    if (!row) return
+    var top = row.mapToItem(body, 0, 0).y
+    var bottom = top + row.height
+    if (top < flick.contentY) flick.contentY = top
+    else if (bottom > flick.contentY + flick.height) flick.contentY = bottom - flick.height
+  }
   onPlanChanged: {
     if (!plan) return
     // From the plan itself: the bindings that count options may not have
@@ -120,6 +131,7 @@ Item {
             Layout.fillWidth: true
             spacing: Tokens.sp(10)
             Repeater {
+              id: optionRows
               model: root.options
               delegate: ColumnLayout {
                 required property var modelData
@@ -204,6 +216,22 @@ Item {
                       width: parent.width
                       text: "$ " + modelData.cmd
                       font.pixelSize: Tokens.small
+                      wrapMode: Text.WrapAnywhere
+                    }
+                    // File contents, or for an edited file the exact change. Long ones
+                    // are cut here; the terminal shows every line before anything runs.
+                    KText {
+                      readonly property var lines: modelData.diff
+                        ? modelData.diff.split("\n").slice(2).filter(function(l) { return l !== "" })
+                        : modelData.content ? modelData.content.replace(/\n$/, "").split("\n") : []
+                      visible: lines.length > 0
+                      width: parent.width
+                      leftPadding: Tokens.sp(14)
+                      text: (modelData.diff ? "changes (+ added, − removed):\n" : "contents:\n")
+                        + lines.slice(0, 12).join("\n")
+                        + (lines.length > 12 ? "\n… " + (lines.length - 12) + " more lines, shown in full in the terminal" : "")
+                      font.pixelSize: Tokens.caption
+                      color: Tokens.fg2
                       wrapMode: Text.WrapAnywhere
                     }
                   }

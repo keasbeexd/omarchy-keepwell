@@ -219,6 +219,11 @@ function leaks(tools) {
 // ---------------------------------------------------------------- privacy
 
 var BLACK_OPS = "managed by Black Ops"
+var KEEPWELL = "set by Keepwell"
+
+// Who owns a setting, for its fact line: Black Ops, Keepwell, or the
+// component it belongs to.
+function owner(blackOps, keepwell, component) { return blackOps ? BLACK_OPS : keepwell ? KEEPWELL : component }
 
 function browser(p, policy) {
   var b = CATALOG.browser
@@ -228,8 +233,10 @@ function browser(p, policy) {
   var locked = policy.total > 0 && policy.set === policy.total
   var policyFact = fact("Privacy policy",
     !policy.set ? "Not installed" : locked ? "All " + policy.total + " in force" : policy.set + " of " + policy.total + " in force",
-    policy.blackOps ? BLACK_OPS : "system-wide policy")
-  var actions = policy.blackOps || locked ? [] : [{ label: "Apply privacy policy…", primary: true, elevated: true }]
+    policy.blackOps ? BLACK_OPS : policy.keepwell ? "set by Keepwell" : "system-wide policy")
+  var actions = policy.blackOps ? []
+    : policy.keepwell ? [{ label: "Remove privacy policy…", elevated: true, act: "chromium-policy-off" }]
+    : locked ? [] : [{ label: "Apply privacy policy…", primary: true, elevated: true, act: "chromium-policy" }]
   if (!p.profile) return check(b, { kind: locked ? "good" : "off", status: "No Chromium profile yet",
     meta: "Open Chromium once, then check again", facts: [policyFact], actions: actions })
   var explicitOn = p.metrics === true || p.safeBrowsingReports === true
@@ -261,22 +268,22 @@ function networkPrivacy(p) {
   var h = p.hosts || { blocked: 0, total: 0 }
   item(h.total > 0, h.blocked === h.total, "Telemetry hosts",
     h.blocked === 0 ? "Not blocked" : h.blocked === h.total ? "All " + h.total + " blocked" : h.blocked + " of " + h.total + " blocked",
-    h.blackOps ? BLACK_OPS : "/etc/hosts")
+    owner(h.blackOps, h.keepwell, "/etc/hosts"))
   item(p.fallbackDns !== null && p.fallbackDns !== undefined, p.fallbackDns === "off", "Backup DNS servers",
     p.fallbackDns === "off" ? "Off" : p.fallbackDns === "custom" ? "Your own servers" : "Public resolvers (Quad9, Cloudflare, Google)",
-    p.fallbackDnsBlackOps ? BLACK_OPS : "systemd-resolved")
+    owner(p.fallbackDnsBlackOps, p.fallbackDnsKeepwell, "systemd-resolved"))
   item(p.connectivity !== null && p.connectivity !== undefined, p.connectivity === "off", "Connection check",
     p.connectivity === "off" ? "Off" : "Asks " + (p.connectivityHost || "a web server"),
-    p.nmBlackOps ? BLACK_OPS : "NetworkManager")
+    owner(p.nmBlackOps, p.connectivityKeepwell, "NetworkManager"))
   var id = p.identity
   item(!!id, !!id && id.mac && id.hostname, "Network identity",
     !id ? "" : (id.mac ? "Private address per network" : "Real hardware address") + (id.hostname ? "" : " · sends computer name"),
-    p.nmBlackOps ? BLACK_OPS : "NetworkManager")
+    owner(p.nmBlackOps, p.identityKeepwell, "NetworkManager"))
   item(p.avahiAnnounces !== null && p.avahiAnnounces !== undefined, p.avahiAnnounces === false, "Local announcements",
     p.avahiAnnounces ? "Announces this computer on the network" : "Off",
-    p.avahiBlackOps ? BLACK_OPS : "Avahi")
+    owner(p.avahiBlackOps, p.avahiKeepwell, "Avahi"))
   item(true, !p.debuginfod, "Debug symbol lookups",
-    p.debuginfod ? "Asks debuginfod.archlinux.org when a program crashes" : "Off", "session")
+    p.debuginfod ? "Asks debuginfod.archlinux.org when a program crashes" : "Off", owner(false, p.debuginfodKeepwell, "session"))
 
   var on = items.filter(function(i) { return i.on }).length
   var n = items.length
@@ -287,7 +294,7 @@ function networkPrivacy(p) {
     meta: on === n ? "Nothing more to turn on" : (n - on) + " optional — each has a small cost",
     facts: items.map(function(i) { return i.f }),
     note: managed ? "The Black Ops plugin manages some of these. Keepwell shows them but leaves them to it." : "",
-    actions: on === n ? [] : [{ label: "Choose what to turn on…", primary: true, elevated: true }]
+    actions: [{ label: on === n ? "Change settings…" : "Choose what to turn on…", primary: on < n, elevated: true, act: "privacy" }]
   })
 }
 
@@ -296,8 +303,9 @@ var APP_NAMES = { vscode: "VS Code", spotify: "Spotify", discord: "Discord", ste
 function apps(p, net) {
   var b = CATALOG.apps
   var list = p.apps || []
-  var dnt = fact("Do Not Track signal", net && net.doNotTrack ? "Sent to tools that honour it" : "Not set", "session")
-  var dntAction = net && net.doNotTrack ? [] : [{ label: "Turn on Do Not Track" }]
+  var dnt = fact("Do Not Track signal", net && net.doNotTrack ? "Sent to tools that honour it" : "Not set",
+    owner(false, net && net.doNotTrackKeepwell, "session"))
+  var dntAction = net && net.doNotTrack ? [] : [{ label: "Turn on Do Not Track…", elevated: true, act: "privacy" }]
   if (list.length === 0) return check(b, { kind: "good", status: "No known reporting apps installed",
     meta: "Arch itself sends nothing", facts: [dnt], actions: dntAction })
   var facts = [], on = 0, actions = []
