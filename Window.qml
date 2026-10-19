@@ -19,9 +19,13 @@ Item {
   property string checkedAt: ""
   property bool checking: false
   // The background-check schedule (Present.schedule), shown in the rail.
-  property var schedule: ({ enabled: false, when: "Off", next: "", checks: "", last: "" })
+  // Both schedules and any missed runs (Present.schedules), and which scan
+  // tools are installed (for the sheet).
+  property var schedules: ({ always: "", deep: { enabled: false, when: "Off" }, missed: [] })
+  property var tools: ({})
   signal scheduleRequested()
-  signal scheduleOffRequested()
+  signal runNow(string kind)
+  signal dismissMissed(string kind)
 
   // network: also ask the Arch security tracker (arch-audit).
   signal checkRequested(bool network)
@@ -55,21 +59,10 @@ Item {
   signal trashDaysChosen(int days)
   signal trashIgnored(string id)
 
-  // The background-checks sheet, driven by the service.
+  // The schedules sheet, driven by the service.
   property bool schedOpen: false
-  property bool schedLoading: true
   property bool schedBusy: false
-  property bool schedEnabled: false
-  property var schedDays: []
-  property string schedTime: "10:00"
-  property var schedParts: []
-  signal schedDayToggled(string day)
-  signal schedEveryDay()
-  signal schedTimeStepped(int minutes)
-  signal schedPartToggled(string part)
-  signal schedScanTargetChosen(string target)
-  signal schedSaved()
-  signal schedTurnedOff()
+  signal schedSaved(var deep)
   signal schedCanceled()
   signal trashAccepted()
   signal trashCanceled()
@@ -223,6 +216,10 @@ Item {
             root.actionCursor = Math.max(-1, root.actionCursor - 1)
           } else if (event.key === Qt.Key_S) {
             root.scheduleRequested()
+          } else if (event.key === Qt.Key_R && root.schedules.missed && root.schedules.missed.length) {
+            root.runNow(root.schedules.missed[0].kind)
+          } else if (event.key === Qt.Key_D && root.schedules.missed && root.schedules.missed.length) {
+            root.dismissMissed(root.schedules.missed[0].kind)
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.activateAction(root.actionCursor >= 0 ? root.actionCursor : root.primaryIndex())
           } else {
@@ -306,67 +303,61 @@ Item {
 
               Rectangle { Layout.fillWidth: true; height: 1; color: Tokens.line }
 
-              // Background checks: a setting of Keepwell, so it lives here
-              // rather than among the checks. S opens it from anywhere.
+              // The always-on checks and the deep-scan schedule: settings of
+              // Keepwell, so they live here rather than among the checks. S
+              // opens them.
               ColumnLayout {
                 Layout.fillWidth: true
                 Layout.margins: Tokens.sp(4)
-                spacing: Tokens.sp(4)
-                RowLayout {
+                spacing: Tokens.sp(6)
+                KText { text: "CHECKS"; font.pixelSize: Tokens.caption; font.letterSpacing: 0.6; color: Tokens.fg3 }
+                ColumnLayout {
                   Layout.fillWidth: true
+                  spacing: Tokens.sp(1)
+                  RowLayout {
+                    Layout.fillWidth: true
+                    KText { Layout.fillWidth: true; text: "Always on"; font.pixelSize: Tokens.small; font.bold: true }
+                    KText { text: "HOURLY"; font.pixelSize: Tokens.caption; font.bold: true }
+                  }
+                  KText { Layout.fillWidth: true; text: root.schedules.always || ""; font.pixelSize: Tokens.caption; color: Tokens.fg2; wrapMode: Text.WordWrap }
+                }
+                ColumnLayout {
+                  id: deepInfo
+                  readonly property var info: root.schedules.deep || ({ enabled: false, when: "Off" })
+                  Layout.fillWidth: true
+                  spacing: Tokens.sp(1)
+                  RowLayout {
+                    Layout.fillWidth: true
+                    KText { Layout.fillWidth: true; text: "Deep scans"; font.pixelSize: Tokens.small; font.bold: true }
+                    KText {
+                      text: deepInfo.info.running ? "RUNNING" : deepInfo.info.enabled ? "ON" : "OFF"
+                      font.pixelSize: Tokens.caption
+                      font.bold: true
+                      color: deepInfo.info.enabled ? Tokens.fg : Tokens.fg3
+                    }
+                  }
                   KText {
                     Layout.fillWidth: true
-                    text: "BACKGROUND CHECKS"
+                    text: deepInfo.info.enabled ? deepInfo.info.when + (deepInfo.info.next ? " · next " + deepInfo.info.next : "") : "Not scheduled"
                     font.pixelSize: Tokens.caption
-                    font.letterSpacing: 0.6
-                    color: Tokens.fg3
+                    color: Tokens.fg2
+                    wrapMode: Text.WordWrap
                   }
                   KText {
-                    text: root.schedule.enabled ? "ON" : "OFF"
+                    Layout.fillWidth: true
+                    visible: !!deepInfo.info.last
+                    text: "Last: " + (deepInfo.info.last || "")
                     font.pixelSize: Tokens.caption
-                    font.bold: true
-                    color: root.schedule.enabled ? Tokens.fg : Tokens.fg3
+                    color: Tokens.fg3
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
                   }
                 }
-                KText {
-                  Layout.fillWidth: true
-                  text: root.schedule.enabled ? root.schedule.when : "Nothing runs unless you turn it on."
-                  font.pixelSize: Tokens.small
-                  font.bold: root.schedule.enabled
-                  color: root.schedule.enabled ? Tokens.fg : Tokens.fg2
-                  wrapMode: Text.WordWrap
-                }
-                KText {
-                  Layout.fillWidth: true
-                  visible: text !== ""
-                  text: root.schedule.enabled ? root.schedule.next : ""
-                  font.pixelSize: Tokens.small
-                  color: Tokens.fg2
-                  wrapMode: Text.WordWrap
-                }
-                KText {
-                  Layout.fillWidth: true
-                  visible: text !== ""
-                  text: root.schedule.last ? "Last: " + root.schedule.last : ""
-                  font.pixelSize: Tokens.caption
-                  color: Tokens.fg3
-                  wrapMode: Text.WordWrap
-                  maximumLineCount: 3
-                  elide: Text.ElideRight
-                }
-                Flow {
-                  Layout.fillWidth: true
-                  Layout.topMargin: Tokens.sp(4)
-                  spacing: Tokens.sp(6)
-                  ActionButton {
-                    label: root.schedule.enabled ? "Change…" : "Set up…"
-                    onActivated: root.scheduleRequested()
-                  }
-                  ActionButton {
-                    visible: root.schedule.enabled
-                    label: "Turn off"
-                    onActivated: root.scheduleOffRequested()
-                  }
+                ActionButton {
+                  Layout.topMargin: Tokens.sp(2)
+                  label: "Checks…"
+                  onActivated: root.scheduleRequested()
                 }
               }
             }
@@ -380,6 +371,32 @@ Item {
               Layout.topMargin: Tokens.sp(16)
               Layout.bottomMargin: Tokens.sp(14)
               spacing: Tokens.sp(14)
+
+              // A scheduled run that was missed (the computer was off or
+              // asleep): say so, and let you run it or let it go.
+              Repeater {
+                model: root.schedules.missed || []
+                delegate: Rectangle {
+                  required property var modelData
+                  Layout.fillWidth: true
+                  implicitHeight: missedRow.implicitHeight + Tokens.sp(16)
+                  radius: Tokens.radius
+                  color: Tokens.accentFill
+                  border.width: 1
+                  border.color: Tokens.accent
+                  RowLayout {
+                    id: missedRow
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: Tokens.sp(14)
+                    width: parent.width - Tokens.sp(28)
+                    spacing: Tokens.sp(10)
+                    Glyph { name: "attn"; color: Tokens.accent; size: Tokens.sp(18) }
+                    KText { Layout.fillWidth: true; text: modelData.text; wrapMode: Text.WordWrap }
+                    ActionButton { label: "Run now"; primary: true; onActivated: root.runNow(modelData.kind) }
+                    ActionButton { label: "Dismiss"; onActivated: root.dismissMissed(modelData.kind) }
+                  }
+                }
+              }
 
               SectionBanner {
                 Layout.fillWidth: true
@@ -444,7 +461,9 @@ Item {
             spacing: Tokens.sp(18)
 
             Repeater {
-              model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["S", "schedule"], ["Esc", "close"]]
+              model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["S", "checks"]]
+                .concat(root.schedules.missed && root.schedules.missed.length ? [["R", "run missed"], ["D", "dismiss"]] : [])
+                .concat([["Esc", "close"]])
               delegate: Row {
                 required property var modelData
                 spacing: Tokens.sp(6)
@@ -482,19 +501,10 @@ Item {
           anchors.fill: parent
           z: 10
           opened: root.schedOpen
-          loading: root.schedLoading
           busy: root.schedBusy
-          enabled: root.schedEnabled
-          days: root.schedDays
-          time: root.schedTime
-          parts: root.schedParts
-          onDayToggled: function(day) { root.schedDayToggled(day) }
-          onEveryDay: root.schedEveryDay()
-          onTimeStepped: function(m) { root.schedTimeStepped(m) }
-          onPartToggled: function(part) { root.schedPartToggled(part) }
-          onScanTargetChosen: function(t) { root.schedScanTargetChosen(t) }
-          onSaved: root.schedSaved()
-          onTurnedOff: root.schedTurnedOff()
+          schedules: root.schedules
+          tools: root.tools
+          onSaved: function(deep) { root.schedSaved(deep) }
           onCanceled: root.schedCanceled()
         }
 

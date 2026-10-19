@@ -8,11 +8,10 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.8.0.** Every check reads your real system and every action
-> works: installs, firewall, updates, snapshots, cleanup and the privacy
-> settings through a visible terminal; virus, secrets and dependency scans in
-> the background; caches, activity traces and unclaimed app folders by moving
-> them to the Trash; optional scheduled checks that only notify.
+> **Status: 0.9.0.** Every check reads your real system and every action
+> works. The quick checks run by themselves (at login and hourly) and notify
+> you when something newly needs attention; the deep scans — virus, secrets,
+> dependencies — run when you ask or on a schedule you choose.
 
 ## What it looks like
 
@@ -44,7 +43,8 @@ theme.
 | ← → / h l     | move through a check's actions|
 | Tab / Shift+Tab | next / previous section     |
 | Enter         | run the selected (or primary) action |
-| S             | background checks             |
+| S             | checks and the deep-scan schedule |
+| R / D         | run / dismiss a missed scheduled scan |
 | Esc           | leave the actions, then close |
 
 ## Installing
@@ -69,17 +69,27 @@ omarchy-shell keepwell toggle
 
 ## When checks run
 
-- Once when the shell starts, so the bar icon is meaningful.
-- When you open the window, if the last result is more than a minute old.
-- When you press **Refresh** (it re-reads the quick checks; the long scans —
-  virus, secrets, dependencies — have their own buttons), after an action's
-  terminal closes, and when a background scan ends.
-- Every 15 seconds while a scan you started is running **and** the window is
-  open, so you see it end. Nothing polls otherwise.
-- On the schedule you set under **Background checks**, if you turn them on
-  (off by default; see below).
+**Always on.** The quick checks — every check in the window except the
+deep scans — run by themselves, with nothing to set up:
 
-Every check is read-only.
+- when the shell starts (at login), and **every hour** while you're logged
+  in, including arch-audit (see Network);
+- when you open the window, if the last result is more than a minute old
+  (the local checks; arch-audit's last result is shown with its time);
+- when you press **Refresh**, after an action's terminal closes, and when a
+  background scan ends.
+
+They take about a second, only read, and change nothing. When a check newly
+needs attention (Review or Act now), the shield changes and Keepwell sends
+one notification for it — once, until it clears. This is the one thing
+Keepwell does in the background without being asked, and it is local and
+read-only apart from arch-audit's download.
+
+**Deep scans** — the virus, secrets and dependency scans — run only when you
+press their buttons, or on the schedule you choose (off by default; see
+[Scheduled deep scans](#scheduled-deep-scans)). While one you started is
+running and the window is open, Keepwell re-reads its state every 15
+seconds so you see it end.
 
 ## What it reads and runs
 
@@ -92,7 +102,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Check | Reads | Runs |
 |---|---|---|
 | Firewall | `/etc/ufw/ufw.conf`, `/etc/default/ufw`, `/etc/ufw/user*.rules` | `systemctl is-enabled/is-active ufw` |
-| Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (only when you ask — see Network) |
+| Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (hourly and when you ask — see Network); `busctl get-property … NetworkManager Metered` |
 | Antivirus | modification times in `/var/lib/clamav`; the newest of Keepwell's scan logs | `systemctl is-enabled/is-active clamav-freshclam`, `systemctl --user is-active keepwell-clamscan`, `crontab -l` |
 | Secrets in your code | the last scan summary (`gitleaks.json`) | `systemctl --user is-active keepwell-gitleaks` |
 | Dependency vulnerabilities | the last scan summary (`osv.json`) | `systemctl --user is-active keepwell-osv` |
@@ -115,13 +125,15 @@ never follow symlinks and stop at an entry and time budget.
 
 ### Network
 
-Keepwell itself makes no network requests. Three things it starts do, only
-when you ask:
+Keepwell itself makes no network requests. These things it starts do:
 
 - **Known vulnerabilities** runs `arch-audit`, which downloads Arch's public
-  security data from `https://security.archlinux.org` (on **Check now** or
-  **Check again** on that check, or **Refresh** — never at startup or on
-  opening the window).
+  security list (about 900 KB) from `https://security.archlinux.org`:
+  at login, **every hour** while you're logged in, and when you press
+  **Check now**, **Check again** or **Refresh**. The hourly run is skipped on
+  a connection NetworkManager marks as metered (the last result stays, with
+  its time); if the tracker can't be reached, the last result stays, marked
+  "couldn't refresh". Roughly 20 MB a day on an unmetered connection.
 - **Dependency vulnerabilities** runs `osv-scanner`, which sends your
   projects' dependency names and versions to Google's OSV.dev service, only
   when you press a scan button. Clicking a row opens its advisory on
@@ -152,8 +164,9 @@ at 0600, written through a fresh temporary file and a rename.
 | `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files |
 | `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
 | `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
-| `schedule.json` | your background-check choices: days, time and what to check (kept when you turn them off, so turning them on again starts from there) |
-| `report.json` | the last background check's one-line summary |
+| `schedules.json` | your deep-scan schedule: days, time, which scans, the battery rule (kept when you turn it off, so turning it on again starts from there) |
+| `runs.json` | the last deep-scan run's time and one-line summary, and which missed run you were told about or dismissed |
+| `alerts.json` | which checks you've already been notified about, so each new problem notifies once |
 
 ## Actions
 
@@ -293,38 +306,43 @@ claims its name** and **nothing in it has changed** for the age you choose
   folder again (**Stop ignoring** on the check undoes that). A folder is
   moved only if it is still a candidate at that moment.
 
-### Background checks
+### Scheduled deep scans
 
-Off until you turn them on. They live at the bottom of the left rail, since
-they're a setting of Keepwell rather than a check of your system: it shows
-the schedule, the next run and the last result, with **Set up…** (or
-**Change…** and **Turn off**); **S** opens it from anywhere. The sheet lets
-you pick what to check — vulnerabilities (arch-audit; uses the network), a
-cleanup report, a virus scan of Downloads or your home folder — and the days
-of the week and the time (30-minute steps). Saving writes two files and
-enables the timer, with no root and no terminal:
+Off until you turn them on. **Checks…** at the bottom of the left rail (or
+**S**) lists the always-on checks and sets the deep-scan schedule: which
+scans — a virus scan of Downloads or your home folder, the secrets scan, the
+dependency scan (each tool once it's installed) — the days of the week, the
+time (30-minute steps), and whether to skip them on battery (on by default).
+Saving writes two files and enables the timer, with no root and no terminal:
 
 ```
-~/.config/systemd/user/keepwell-report.timer     OnCalendar=Mon,Wed,Fri *-*-* 11:00:00, Persistent=true
-~/.config/systemd/user/keepwell-report.service   ExecStart=/usr/bin/python3 -I -S <plugin>/bin/keepwell-run report
+~/.config/systemd/user/keepwell-deep.timer     OnCalendar=Sat *-*-* 13:00:00
+~/.config/systemd/user/keepwell-deep.service   ExecStart=/usr/bin/python3 -I -S <plugin>/bin/keepwell-run run deep --scheduled
 ```
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now keepwell-report.timer
+systemctl --user enable --now keepwell-deep.timer
 ```
 
 The schedule is checked with `systemd-analyze calendar` before anything is
 written. Both files start with a `# Written by the Keepwell plugin` line;
-Keepwell refuses to replace a file of either name that lacks it, and **Turn
-off** (`systemctl --user disable --now keepwell-report.timer`) deletes only
-files that have it. `Persistent=true` runs a missed check at the next start.
+Keepwell refuses to replace a file of either name that lacks it, and turning
+the schedule off (`systemctl --user disable --now keepwell-deep.timer`)
+deletes only files that have it.
 
-Each run runs the read-only check, starts the virus scan if you chose one
-(the same background scan as above, with its own notification), saves a
-one-line summary and sends one notification — for example "No fixes waiting
-for known issues; 681 MB can be freed." It never removes, installs or
-changes anything.
+A run starts the chosen scans one after another as the usual background
+services (so their cards show progress and **Stop scan** works), waits for
+them, saves a one-line summary and sends **one** notification — for example
+"Virus scan of Downloads: nothing found; no secrets found." It never removes,
+installs or changes anything.
+
+**Missed runs.** If the computer is off, suspended or hibernating at the
+scheduled time, the run doesn't happen late: a run that would start more
+than 10 minutes after its time is recorded as missed instead. Keepwell then
+raises the shield to Review, sends one notification, and shows a strip at
+the top of the window — "The last scheduled deep scan (Sat 24 Oct, 13:00) was
+missed. Next: …" — with **Run now** (**R**) and **Dismiss** (**D**).
 
 ### Moving things to Trash
 
@@ -359,13 +377,13 @@ A scan that is running carries on until it ends, even after removal; stop it
 first with **Stop scan**, or with
 `systemctl --user stop keepwell-clamscan.service keepwell-gitleaks.service keepwell-osv.service`.
 
-**If background checks are on, turn them off before removing** (**Turn off**
-at the bottom of the left rail). Otherwise the timer stays and fails harmlessly each time,
+**If deep scans are scheduled, turn the schedule off before removing**
+(**Checks…** at the bottom of the left rail). Otherwise the timer stays and fails harmlessly each time,
 since the script it runs is gone. To remove it by hand:
 
 ```bash
-systemctl --user disable --now keepwell-report.timer
-rm ~/.config/systemd/user/keepwell-report.timer ~/.config/systemd/user/keepwell-report.service
+systemctl --user disable --now keepwell-deep.timer
+rm ~/.config/systemd/user/keepwell-deep.timer ~/.config/systemd/user/keepwell-deep.service
 systemctl --user daemon-reload
 ```
 

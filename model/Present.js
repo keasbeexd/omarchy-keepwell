@@ -136,7 +136,7 @@ function auditKinds(kinds) {
 
 function audit(p, net, now) {
   var b = CATALOG.audit
-  var note = "Checking downloads Arch's public security list from security.archlinux.org."
+  var note = "Keepwell checks this every hour while you're logged in, downloading Arch's public security list (about 900 KB) from security.archlinux.org — except on a connection marked as metered."
   if (!p.installed) return check(b, { kind: "off", status: "arch-audit isn't installed",
     meta: "Small, official tool from the Arch repos", note: note,
     facts: [fact("Installed", "No")], actions: [install("Install arch-audit", "install-arch-audit")] })
@@ -171,6 +171,7 @@ function audit(p, net, now) {
     : pkgs.length ? plural(pkgs.length, "package has", "packages have") + " known issues, none fixed yet"
     : "No known issues in installed packages"
   var meta = (fixable.length ? fixable.length + " fixable · " : "") + (pkgs.length - fixable.length) + " waiting for a fix · checked " + ago(p.at, now)
+    + (p.refreshFailed ? " · couldn't refresh (offline?)" : p.skipped === "metered" ? " · not refreshed on a metered connection" : "")
   var whatNow = fixable.length
     ? "Updating installs the fixed versions. Issues still waiting for a fix need nothing from you yet."
     : "There is nothing to do right now: no fixed versions have been released. They arrive through normal updates, and Keepwell will flag them when they do. Most of these need someone to send you a specially crafted file or page."
@@ -339,8 +340,17 @@ function deps(tools, now) {
     if (x.vulns && x.vulns[0] && /^[A-Za-z0-9._:-]{1,64}$/.test(x.vulns[0].id)) row.url = "https://osv.dev/vulnerability/" + x.vulns[0].id
     facts.push(row)
   }
+  // A project osv-scanner couldn't check (offline, OSV.dev unreachable) is
+  // never counted as clean.
+  if (last.failed && !f.length) return check(b, { kind: "attn",
+    status: last.scanned ? "Only " + last.scanned + " of " + (last.scanned + last.failed) + " projects could be checked"
+      : "Couldn't check your projects",
+    meta: "osv-scanner couldn't reach OSV.dev, or stopped — check your connection and scan again",
+    facts: facts, note: network,
+    actions: [{ label: "Scan again", primary: true, rescan: "osv", folder: last.folder }]
+      .concat(last.folder === "~" ? [choose] : [home, choose]) })
   return check(b, {
-    kind: fixable.length ? "attn" : f.length ? "info" : "good",
+    kind: fixable.length || last.failed ? "attn" : f.length ? "info" : "good",
     status: f.length ? plural(f.length, "dependency has", "dependencies have") + " known vulnerabilities"
       : !last.scanned ? "No projects found in that folder"
       : last.noLockfiles >= last.scanned ? "Nothing to check: no dependency files in " + plural(last.scanned, "project", "projects")
@@ -611,19 +621,27 @@ function nextWords(s) {
   return m[1] + " " + Number(m[4]) + " " + months[Number(m[3]) - 1] + ", " + m[5]
 }
 
-// The background-check schedule, for the rail's footer: it's a setting of
-// Keepwell rather than a check of the system.
-function schedule(doc, now) {
-  var p = doc && doc.probes && doc.probes.schedule && typeof doc.probes.schedule === "object" ? doc.probes.schedule : {}
-  var last = p.last && typeof p.last.at === "number" ? ago(p.last.at, now) + " · " + p.last.summary : ""
-  if (!p.enabled) return { enabled: false, when: "Off", next: "", checks: "", last: last }
-  return {
-    enabled: true,
-    when: dayWords(p.days) + " at " + p.time,
-    next: p.next ? "Next: " + nextWords(p.next) : "",
-    checks: (p.parts || []).map(function(x) { return PART_NAMES[x] || x }).join(", "),
-    last: last
+// The always-on checks and the deep-scan schedule, for the rail's footer and
+// the missed-run strip: settings of Keepwell rather than checks of the system.
+function schedules(doc, now) {
+  var probe = doc && doc.probes && doc.probes.schedule && typeof doc.probes.schedule === "object" ? doc.probes.schedule : {}
+  var p = probe.deep && typeof probe.deep === "object" ? probe.deep : {}
+  var out = {
+    always: doc ? "Checked " + ago(doc.at, now) : "Checking…",
+    deep: {
+      enabled: p.enabled === true,
+      running: p.running === true,
+      when: p.enabled ? dayWords(p.days) + " at " + p.time : "Off",
+      next: p.enabled && p.next ? nextWords(p.next) : "",
+      last: p.last && typeof p.last.at === "number" ? ago(p.last.at, now) + " · " + p.last.summary : "",
+      settings: p
+    },
+    missed: []
   }
+  if (typeof p.missed === "number")
+    out.missed.push({ kind: "deep", text: "The last scheduled deep scan (" + stamp(p.missed) + ") was missed"
+      + (p.next ? ". Next: " + nextWords(p.next) + "." : ".") })
+  return out
 }
 
 // ---------------------------------------------------------------- assembly

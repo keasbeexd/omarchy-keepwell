@@ -6,12 +6,15 @@
                                     terminal, wait for Enter, then run it
     keepwell-run list  <set>                  items that can go to Trash, as JSON
     keepwell-run trash <set> <id>...          move those items to Trash
-    keepwell-run schedule get | off | set <days> <HH:MM> <parts>
-                                              the background checks: days like
-                                              mon,wed; parts from vulns, cleanup,
-                                              scan-downloads, scan-home
-    keepwell-run report                       (run by the timer) the checks, one
-                                              notification, never any change
+    keepwell-run schedule get | off deep | dismiss deep | run-now deep | missed-notify
+    keepwell-run schedule set deep <days> <HH:MM> <parts> on|off
+                                              the deep-scan schedule (keepwell_schedule.py);
+                                              days like mon,wed; parts from
+                                              scan-downloads, scan-home, leaks, osv;
+                                              on|off: skip the scans on battery
+    keepwell-run run deep [--scheduled]       one run: the scans, one notification,
+                                              never any change
+    keepwell-run alert <id:kind|text>...      notify once for each newly flagged check
     keepwell-run unclaimed days <n> | ignore <id>... | unignore
                                               the unclaimed finder's settings
     keepwell-run scan  downloads|home         start a ClamAV scan in the background
@@ -58,6 +61,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import keepwell_state  # noqa: E402
 import keepwell_unclaimed  # noqa: E402
+import keepwell_schedule  # noqa: E402
 
 OMARCHY = "/usr/bin/omarchy"
 SUDO = "/usr/bin/sudo"
@@ -79,11 +83,14 @@ DISPLAY_ENV = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DES
                "DBUS_SESSION_BUS_ADDRESS", "XCURSOR_SIZE", "XCURSOR_THEME", "GTK_THEME", "HOME", "LANG")
 
 
-def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,)):
+def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,), failed=""):
     """stdout of argv as text, or "" on failure, overrun or overflow. ok_codes:
     exit codes that count as success (some scanners exit 1 when they find
-    something)."""
+    something). failed: what to return when it didn't work — pass None
+    where "no output" and "couldn't run" must not be confused."""
     env = {"PATH": "/usr/bin", "LC_ALL": "C"}
+    # `systemctl --user` reaches your session's service manager through these.
+    env.update({k: os.environ[k] for k in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS") if k in os.environ})
     if gui:
         env.update({k: os.environ[k] for k in DISPLAY_ENV if k in os.environ})
         env.pop("LC_ALL")
@@ -92,7 +99,7 @@ def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,)):
                                 stderr=subprocess.DEVNULL, env=env,
                                 cwd="/", start_new_session=True, close_fds=True)
     except OSError:
-        return ""
+        return failed
     deadline, chunks, size, ok = time.monotonic() + timeout, [], 0, True
     fd = proc.stdout.fileno()
     while True:
@@ -119,14 +126,14 @@ def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,)):
                 break
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 continue
-        return ""
+        return failed
     try:
         proc.wait(timeout=max(0.1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
-        return ""
-    return b"".join(chunks).decode("utf-8", "replace") if proc.returncode in ok_codes else ""
+        return failed
+    return b"".join(chunks).decode("utf-8", "replace") if proc.returncode in ok_codes else failed
 
 
 def human(n):
@@ -777,7 +784,7 @@ UNITS = {"clamscan": "keepwell-clamscan.service", "gitleaks": "keepwell-gitleaks
          "osv": "keepwell-osv.service"}
 
 
-def _background(unit, kind, argv):
+def _background(unit, kind, argv, quiet=False):
     if capture(["/usr/bin/systemctl", "--user", "is-active", unit], timeout=3, cap=256).strip() in ("active", "activating"):
         return {"started": False, "reason": "running"}
     # When the scan ends, this script (from its own absolute path) reads the
@@ -786,7 +793,7 @@ def _background(unit, kind, argv):
     me = os.path.realpath(__file__)
     if not re.fullmatch(r"/[A-Za-z0-9/._@+-]+", me):
         return {"started": False, "reason": "path"}
-    notify = "ExecStopPost=/usr/bin/python3 -I -S %s notify %s" % (me, kind)
+    notify = "ExecStopPost=/usr/bin/python3 -I -S %s notify %s%s" % (me, kind, " --quiet" if quiet else "")
     rc = subprocess.call(["/usr/bin/systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
                           "--property=Nice=19", "--property=IOSchedulingClass=idle",
                           "--property=" + notify, "--"] + argv,
@@ -798,7 +805,7 @@ def _background(unit, kind, argv):
     return {"started": rc == 0}
 
 
-def start_scan(target):
+def start_scan(target, quiet=False):
     if not _trusted("/usr/bin/clamscan"):
         return {"started": False, "reason": "missing"}
     path = os.path.join(HOME, "Downloads") if target == "downloads" else HOME
@@ -809,7 +816,7 @@ def start_scan(target):
         # discarded, or written by the scan itself.
         for sub in (".cache", ".local/share/Trash", ".local/state/keepwell"):
             argv.append("--exclude-dir=^" + re.escape(os.path.join(HOME, sub)) + "(/|$)")
-    return _background(UNITS["clamscan"], "clamscan", argv + ["--", path])
+    return _background(UNITS["clamscan"], "clamscan", argv + ["--", path], quiet)
 
 
 def _scan_root(folder):
@@ -824,7 +831,7 @@ def _scan_root(folder):
     return real
 
 
-def start_leaks(folder):
+def start_leaks(folder, quiet=False):
     if not _trusted("/usr/bin/gitleaks"):
         return {"started": False, "reason": "missing"}
     real = _scan_root(folder)
@@ -832,17 +839,17 @@ def start_leaks(folder):
         return {"started": False, "reason": "folder"}
     me = os.path.realpath(__file__)
     return _background(UNITS["gitleaks"], "gitleaks",
-                       ["/usr/bin/python3", "-I", "-S", me, "leaks-scan", real])
+                       ["/usr/bin/python3", "-I", "-S", me, "leaks-scan", real], quiet)
 
 
-def start_osv(folder):
+def start_osv(folder, quiet=False):
     if not _trusted("/usr/bin/osv-scanner"):
         return {"started": False, "reason": "missing"}
     real = _scan_root(folder)
     if not real:
         return {"started": False, "reason": "folder"}
     me = os.path.realpath(__file__)
-    return _background(UNITS["osv"], "osv", ["/usr/bin/python3", "-I", "-S", me, "osv-scan", real])
+    return _background(UNITS["osv"], "osv", ["/usr/bin/python3", "-I", "-S", me, "osv-scan", real], quiet)
 
 
 # osv-scanner reports each vulnerability as a full OSV record; a group joins
@@ -936,8 +943,14 @@ def osv_scan(root):
     for repo in repos:
         if not repo.startswith("/"):
             continue
+        # 0 nothing found, 1 vulnerabilities, 128 no dependency files. Any
+        # other ending (offline, OSV.dev unreachable, timeout) is a failure,
+        # never "nothing found".
         out = capture(["/usr/bin/osv-scanner", "scan", "source", "-r", "--format", "json", repo],
-                      timeout=300, cap=64 << 20, ok_codes=(0, 1, 128))
+                      timeout=300, cap=64 << 20, ok_codes=(0, 1, 128), failed=None)
+        if out is None:
+            failed += 1
+            continue
         try:
             doc = json.loads(out) if out.strip() else {"results": []}
         except ValueError:
@@ -965,7 +978,10 @@ def _plain(text_value, limit):
     return text_value[:limit]
 
 
-def notify(kind):
+def notify(kind, quiet=False):
+    if quiet:
+        _refresh()
+        return 0
     if kind == "clamscan":
         found = keepwell_state.latest_log()
         log = found[1].decode("utf-8", "replace") if found and found[1] else ""
@@ -990,9 +1006,10 @@ def notify(kind):
         else:
             n = doc.get("packages", 0)
             fixable = sum(1 for f in doc.get("findings") or [] if f.get("fixable"))
-            title = "Dependency scan finished"
+            title = "Dependency scan finished" if not doc.get("failed") else "Dependency scan incomplete"
             body = ("%d package%s with known vulnerabilities (%d fixable)" % (n, "" if n == 1 else "s", fixable)
-                    if n else "No known vulnerabilities") + " in %d project%s." % (doc.get("scanned", 0), "" if doc.get("scanned", 0) == 1 else "s")
+                    if n else "No known vulnerabilities") + " in %d project%s." % (doc.get("scanned", 0), "" if doc.get("scanned", 0) == 1 else "s") \
+                + (" %d couldn't be checked (offline?)." % doc["failed"] if doc.get("failed") else "")
     else:
         doc = keepwell_state.read_json("gitleaks.json") or {}
         if not doc.get("finished") or not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
@@ -1091,25 +1108,13 @@ def leaks_scan(root):
     return 0
 
 
-# ---------------------------------------------------------------- background checks
-# An optional timer, off until you turn it on: on the days and at the time
-# you choose it runs `keepwell-run report`, which checks what you picked and
-# sends one notification. It never changes anything; a virus scan it starts
-# only reads.
+# ---------------------------------------------------------------- schedules
+# The deep scans' optional timer (see keepwell_schedule.py). A scheduled run
+# that starts late doesn't run: it's recorded and reported as missed, so you
+# choose when. Every run ends with one notification. Nothing is changed. The
+# quick checks need no timer: the Keepwell service runs them hourly itself.
 
-DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-PARTS = ("vulns", "cleanup", "scan-downloads", "scan-home")
-TIMER, SERVICE = "keepwell-report.timer", "keepwell-report.service"
-
-
-def _calendar(days, at):
-    return "%s *-*-* %s:00" % (",".join(d.capitalize() for d in days), at)
-
-
-def _next_run(expr):
-    out = capture(["/usr/bin/systemd-analyze", "calendar", "--", expr], timeout=5, cap=4096)
-    m = re.search(r"(?m)^\s*Next elapse: (.+)$", out)
-    return m.group(1).strip()[:64] if m else None
+LEGACY_UNITS = ("keepwell-report.timer", "keepwell-report.service")
 
 
 def _user_systemctl(*args):
@@ -1117,111 +1122,269 @@ def _user_systemctl(*args):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
 
 
+def _cap(argv):
+    return capture(argv, timeout=5, cap=8192)
+
+
+def _migrate():
+    """Earlier versions had one schedule (keepwell-report) and then a health
+    timer. Quick checks now run by themselves, so both timers go; a virus scan
+    the old schedule included carries over to the deep scans."""
+    legacy_on = _cap(["/usr/bin/systemctl", "--user", "is-enabled", "keepwell-report.timer"]).strip() == "enabled"
+    removed = False
+    for timer, service in (("keepwell-report.timer", "keepwell-report.service"),
+                           ("keepwell-health.timer", "keepwell-health.service")):
+        if os.path.exists(os.path.join(HOME, ".config/systemd/user", timer)):
+            _user_systemctl("disable", "--now", timer)
+            keepwell_state.remove_unit(timer)
+            keepwell_state.remove_unit(service)
+            removed = True
+    if removed:
+        _user_systemctl("daemon-reload")
+    if not legacy_on:
+        return
+    old = keepwell_state.read_json("schedule.json") or {}
+    scans = [p for p in old.get("parts") or [] if p in ("scan-downloads", "scan-home")]
+    if scans:
+        days = ",".join(d for d in keepwell_schedule.DAYS if d in (old.get("days") or ["sat"]))
+        schedule_set("deep", days, old.get("time") or "13:00", scans[0], "on")
+
+
 def schedule_get():
-    doc = keepwell_state.read_json("schedule.json") or {}
-    days = [d for d in doc.get("days", []) if d in DAYS]
-    at = doc.get("time") if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(doc.get("time"))) else "10:00"
-    parts = [x for x in doc.get("parts", []) if x in PARTS]
-    on = capture(["/usr/bin/systemctl", "--user", "is-enabled", TIMER], timeout=3, cap=256).strip() == "enabled"
-    last = keepwell_state.read_json("report.json") or {}
-    return {"enabled": on and bool(days), "days": days or ["mon"], "time": at, "parts": parts or ["vulns", "cleanup"],
-            "next": _next_run(_calendar(days, at)) if on and days else None,
-            "last": {"at": last["at"], "summary": str(last.get("summary", ""))[:200]} if isinstance(last.get("at"), int) else None}
+    _migrate()
+    return keepwell_schedule.status(_cap)
 
 
-def schedule_set(days_arg, at, parts_arg):
+def schedule_set(kind, days_arg, at, parts_arg, battery="on"):
+    if kind != "deep":
+        return {"saved": False, "reason": "kind"}
     days = days_arg.split(",")
-    parts = parts_arg.split(",")
-    if not days or any(d not in DAYS for d in days) or len(set(days)) != len(days):
+    if not days or any(d not in keepwell_schedule.DAYS for d in days) or len(set(days)) != len(days):
         return {"saved": False, "reason": "days"}
-    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at):
+    if not keepwell_schedule.TIME.fullmatch(at):
         return {"saved": False, "reason": "time"}
-    if not parts or any(x not in PARTS for x in parts) or {"scan-downloads", "scan-home"} <= set(parts):
+    parts = parts_arg.split(",")
+    if any(x not in keepwell_schedule.DEEP_PARTS for x in parts) or len(set(parts)) != len(parts) \
+            or {"scan-downloads", "scan-home"} <= set(parts) or not parts:
         return {"saved": False, "reason": "parts"}
-    days = [d for d in DAYS if d in days]
-    expr = _calendar(days, at)
-    nxt = _next_run(expr)
-    if not nxt:
-        return {"saved": False, "reason": "calendar"}
+    if battery not in ("on", "off"):
+        return {"saved": False, "reason": "battery"}
+    timer, service = keepwell_schedule.units(kind)
+    if not (keepwell_state.unit_free(service) and keepwell_state.unit_free(timer)):
+        return {"saved": False, "reason": "exists"}
     me = os.path.realpath(__file__)
     if not re.fullmatch(r"/[A-Za-z0-9/._@+-]+", me):
         return {"saved": False, "reason": "path"}
-    if not (keepwell_state.unit_free(SERVICE) and keepwell_state.unit_free(TIMER)):
-        return {"saved": False, "reason": "exists"}
-    mark = keepwell_state.UNIT_MARK.decode() + "; turn background checks off in Keepwell to remove it.\n"
-    keepwell_state.write_unit(SERVICE, (mark +
-        "[Unit]\nDescription=Keepwell background check (reads only; notifies, never changes anything)\n\n"
-        "[Service]\nType=oneshot\nNice=19\nIOSchedulingClass=idle\n"
-        "ExecStart=/usr/bin/python3 -I -S %s report\n" % me).encode())
-    keepwell_state.write_unit(TIMER, (mark +
-        "[Unit]\nDescription=Keepwell background check schedule\n\n"
-        "[Timer]\nOnCalendar=%s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n" % expr).encode())
-    keepwell_state.write("schedule.json", json.dumps({"days": days, "time": at, "parts": parts}).encode())
-    if _user_systemctl("daemon-reload") != 0 or _user_systemctl("enable", "--now", TIMER) != 0:
+    conf = keepwell_schedule.settings()
+    old = conf[kind]
+    new = {"days": [d for d in keepwell_schedule.DAYS if d in days], "time": at,
+           # Slots before a change aren't "missed": the clock starts now.
+           "since": int(time.time()) if (old.get("days"), old.get("time")) != (days, at) or not old.get("since") else old["since"]}
+    new.update(parts=parts, battery=battery == "on")
+    expr = keepwell_schedule.calendar(new)
+    m = re.search(r"(?m)^\s*Next elapse: (.+)$", _cap(["/usr/bin/systemd-analyze", "calendar", "--", expr]))
+    if not m:
+        return {"saved": False, "reason": "calendar"}
+    conf[kind] = new
+    keepwell_schedule.save_settings(conf)
+    mark = keepwell_state.UNIT_MARK.decode() + "; turn it off in Keepwell to remove it.\n"
+    what = "deep scan"
+    keepwell_state.write_unit(service, (mark +
+        "[Unit]\nDescription=Keepwell scheduled %s (reads only; notifies, never changes anything)\n\n"
+        "[Service]\nType=oneshot\nNice=19\nIOSchedulingClass=idle\nTimeoutStartSec=%s\n"
+        "ExecStart=/usr/bin/python3 -I -S %s run %s --scheduled\n" % (what, "12h", me, kind)).encode())
+    # No Persistent=: a run the computer slept or was off through is missed
+    # and reported, not run late.
+    keepwell_state.write_unit(timer, (mark +
+        "[Unit]\nDescription=Keepwell %s schedule\n\n"
+        "[Timer]\nOnCalendar=%s\nAccuracySec=1min\n\n[Install]\nWantedBy=timers.target\n" % (what, expr)).encode())
+    if _user_systemctl("daemon-reload") != 0 or _user_systemctl("enable", "--now", timer) != 0:
         return {"saved": False, "reason": "systemd"}
-    return {"saved": True, "next": nxt}
+    return {"saved": True, "next": m.group(1).strip()[:64]}
 
 
-def schedule_off():
-    _user_systemctl("disable", "--now", TIMER)
-    keepwell_state.remove_unit(TIMER)
-    keepwell_state.remove_unit(SERVICE)
+def schedule_off(kind):
+    timer, service = keepwell_schedule.units(kind)
+    _user_systemctl("disable", "--now", timer)
+    keepwell_state.remove_unit(timer)
+    keepwell_state.remove_unit(service)
     _user_systemctl("daemon-reload")
     return {"saved": True}
 
 
-def report():
-    """What the timer runs: the chosen checks, one notification, no changes."""
-    conf = schedule_get()
-    parts = set(conf["parts"])
-    me = os.path.dirname(os.path.realpath(__file__))
-    argv = ["/usr/bin/python3", "-I", "-S", os.path.join(me, "keepwell-check")]
-    if "vulns" in parts:
-        argv.append("--network")
-    try:
-        probes = json.loads(capture(argv, timeout=90, cap=256 * 1024) or "{}").get("probes", {})
-    except ValueError:
-        probes = {}
-    said = []
-    if "vulns" in parts:
-        a = probes.get("audit") or {}
-        if not a.get("installed"):
-            said.append("vulnerability check needs arch-audit")
-        elif not a.get("ran"):
-            said.append("couldn't reach the security tracker")
+def on_battery():
+    """True when a battery is present and no mains supply is online."""
+    base, battery, mains = "/sys/class/power_supply", False, False
+    for name in os.listdir(base) if os.path.isdir(base) else []:
+        kind = (read_root_file(os.path.join(base, name, "type"), 64) or b"").strip()
+        if kind == b"Battery":
+            battery = True
+        elif kind == b"Mains" and (read_root_file(os.path.join(base, name, "online"), 8) or b"").strip() == b"1":
+            mains = True
+    return battery and not mains
+
+
+def _wait(unit, limit=12 * 3600):
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if _cap(["/usr/bin/systemctl", "--user", "is-active", unit]).strip() not in ("active", "activating"):
+            return
+        time.sleep(5)
+
+
+def _deep_summary(parts, started, skipped):
+    said = list(skipped)
+    if "scan-downloads" in parts or "scan-home" in parts:
+        found = keepwell_state.latest_log()
+        log = found[1].decode("utf-8", "replace") if found and found[1] and int(found[0][:10]) >= started - 5 else ""
+        where = "home folder" if "scan-home" in parts else "Downloads"
+        if not log:
+            pass
+        elif "----------- SCAN SUMMARY -----------" not in log:
+            said.append("virus scan of %s stopped before the end" % where)
         else:
-            pkgs = a.get("packages") or []
-            fixable = [x for x in pkgs if x.get("fixed")]
-            said.append("an update fixes %d known issue%s" % (len(fixable), "" if len(fixable) == 1 else "s")
-                        if fixable else "no fixes waiting for known issues")
-    if "cleanup" in parts:
-        c = probes.get("cleanup") or {}
-        total = sum((c.get(k) or {}).get("bytes", 0) for k in ("pkgCacheAll", "pkgUninstalled", "orphans", "homeCache"))
-        said.append("%s can be freed" % human(total) if total else "nothing to clean up")
-    for target in ("downloads", "home"):
-        if "scan-" + target in parts:
-            started = start_scan(target)
-            said.append("virus scan of %s started" % ("Downloads" if target == "downloads" else "your home folder")
-                        if started.get("started") else "virus scan couldn't start")
-    summary = "; ".join(said)
-    summary = summary[:1].upper() + summary[1:] + "." if summary else "Nothing chosen to check."
-    keepwell_state.write("report.json", json.dumps({"at": int(time.time()), "summary": summary}).encode())
-    _notify("Keepwell check", summary)
+            bad = re.search(r"(?m)^Infected files: (\d+)$", log)
+            n = int(bad.group(1)) if bad else 0
+            said.append("virus scan of %s: %s" % (where, "%d infected file%s" % (n, "" if n == 1 else "s") if n else "nothing found"))
+    for name, label, key in (("leaks", "secrets", "gitleaks.json"), ("osv", "dependencies", "osv.json")):
+        if name not in parts:
+            continue
+        doc = keepwell_state.read_json(key) or {}
+        if not isinstance(doc.get("at"), int) or doc["at"] < started - 5 or not doc.get("finished"):
+            if not any(label in s_ for s_ in skipped):
+                said.append("%s scan stopped before the end" % label)
+            continue
+        if name == "leaks":
+            n = len(doc.get("findings") or [])
+            said.append("%d possible secret%s" % (n, "" if n == 1 else "s") if n else "no secrets found")
+        else:
+            n = doc.get("packages", 0)
+            if doc.get("failed") and not n:
+                said.append("dependencies couldn't be checked (offline?)")
+            else:
+                said.append("%d dependenc%s with known vulnerabilities" % (n, "y" if n == 1 else "ies") if n
+                            else "no vulnerable dependencies")
+    text_value = "; ".join(said) or "nothing to scan"
+    return text_value[:1].upper() + text_value[1:] + "."
+
+
+def _scan_folder(state_name):
+    doc = keepwell_state.read_json(state_name) or {}
+    folder = doc.get("folder")
+    return folder if isinstance(folder, str) and (folder == "~" or folder.startswith(("~/", "/"))) else "~"
+
+
+def run(kind, scheduled):
+    conf = keepwell_schedule.settings()[kind]
+    started = int(time.time())
+    if scheduled:
+        slot = keepwell_schedule.last_slot(conf, started)
+        if slot is None or started - slot > keepwell_schedule.LATE:
+            # The computer was off, asleep or busy at the time: don't run late.
+            return missed_notify()
+    else:
+        slot = None
+    skipped, parts = [], conf["parts"]
+    if conf["battery"] and on_battery():
+        skipped.append("on battery: scans skipped")
+        parts = []
+    steps = []
+    for part in parts:
+        if part in ("scan-downloads", "scan-home"):
+            steps.append(("clamscan", lambda p=part: start_scan(p[5:], quiet=True)))
+        elif part == "leaks":
+            steps.append(("gitleaks", lambda: start_leaks(_scan_folder("gitleaks.json"), quiet=True)))
+        elif part == "osv":
+            steps.append(("osv", lambda: start_osv(_scan_folder("osv.json"), quiet=True)))
+    for unit_kind, start in steps:
+        _wait(UNITS[unit_kind])                 # one you started by hand finishes first
+        result = start()
+        if result.get("reason") == "missing":
+            skipped.append({"clamscan": "virus scan needs ClamAV", "gitleaks": "secrets scan needs gitleaks",
+                            "osv": "dependencies scan needs osv-scanner"}[unit_kind])
+            continue
+        if result.get("started"):
+            _wait(UNITS[unit_kind])
+    summary = _deep_summary(conf["parts"] if parts else [], started, skipped)
+    title = "Keepwell deep scan"
+    keepwell_schedule.save_run(kind, at=started, end=int(time.time()), summary=summary,
+                               **({"slot": slot} if slot else {}))
+    _notify(title, summary)
     return 0
 
 
-def _notify(title, body):
+def missed_notify():
+    """One notification per missed run, however often this is asked."""
+    status = keepwell_schedule.status(_cap)
+    done = keepwell_schedule.runs()
+    for kind in keepwell_schedule.KINDS:
+        slot = status[kind].get("missed")
+        if not slot or done[kind].get("notified", 0) >= slot:
+            continue
+        keepwell_schedule.save_run(kind, notified=slot)
+        what = "deep scan"
+        _notify("Scheduled %s missed" % what,
+                "The %s set for %s didn't run — the computer was off or asleep. Open Keepwell to run it now."
+                % (what, time.strftime("%a %d %b, %H:%M", time.localtime(slot))))
+    return 0
+
+
+def run_now(kind):
+    """Start a run from the window, independent of the shell."""
+    me = os.path.realpath(__file__)
+    unit = "keepwell-%s-now.service" % kind
+    if _cap(["/usr/bin/systemctl", "--user", "is-active", unit]).strip() in ("active", "activating"):
+        return {"started": False, "reason": "running"}
+    rc = subprocess.call(["/usr/bin/systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
+                          "--property=Nice=19", "--property=IOSchedulingClass=idle", "--",
+                          "/usr/bin/python3", "-I", "-S", me, "run", kind],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    return {"started": rc == 0}
+
+
+def alert(items):
+    """Called by the Keepwell service after each check with what needs
+    attention now ("id:kind|title: status"). Notifies once for each that
+    wasn't already flagged, and forgets ones that cleared, so they alert again
+    if they come back."""
+    seen = set((keepwell_state.read_json("alerts.json") or {}).get("ids") or [])
+    now, new = {}, []
+    for item in items[:40]:
+        key, _, text_value = item.partition("|")
+        if not re.fullmatch(r"[a-z]{2,16}:(crit|attn)", key) or not text_value:
+            continue
+        now[key] = text_value
+        if key not in seen:
+            new.append(_plain(text_value, 120))
+    keepwell_state.write("alerts.json", json.dumps({"ids": sorted(now)}).encode())
+    if new:
+        _notify("Keepwell: needs your attention" if len(new) > 1 else "Keepwell", "; ".join(new[:4]) + ".")
+    return {"notified": len(new)}
+
+
+def _refresh():
     env = {"PATH": "/usr/bin", "HOME": HOME, "LANG": "C.UTF-8",
            "OMARCHY_PATH": os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy"}
     env.update({k: os.environ[k] for k in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY") if k in os.environ})
-    for argv in (["/usr/bin/notify-send", "--app-name=Keepwell", "--", _plain(title, 60), _plain(body, 200)],
-                 ["/usr/bin/omarchy-shell", "-q", "keepwell", "refresh"]):
-        if _trusted(argv[0]):
-            try:
-                subprocess.call(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, env=env, timeout=10)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+    if _trusted("/usr/bin/omarchy-shell"):
+        try:
+            subprocess.call(["/usr/bin/omarchy-shell", "-q", "keepwell", "refresh"], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _notify(title, body):
+    env = {"PATH": "/usr/bin", "HOME": HOME, "LANG": "C.UTF-8"}
+    env.update({k: os.environ[k] for k in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY") if k in os.environ})
+    if _trusted("/usr/bin/notify-send"):
+        try:
+            subprocess.call(["/usr/bin/notify-send", "--app-name=Keepwell", "--", _plain(title, 60), _plain(body, 240)],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            env=env, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    _refresh()
 
 
 def pending(args):
@@ -1398,8 +1561,8 @@ def main():
     if len(args) == 2 and args[0] == "leaks":
         sys.stdout.write(json.dumps(start_leaks(args[1])))
         return 0
-    if len(args) == 2 and args[0] == "notify" and args[1] in UNITS:
-        return notify(args[1])
+    if len(args) in (2, 3) and args[0] == "notify" and args[1] in UNITS and args[2:] in ([], ["--quiet"]):
+        return notify(args[1], args[2:] == ["--quiet"])
     if len(args) == 2 and args[0] == "leaks-scan":
         return leaks_scan(args[1])
     if len(args) == 2 and args[0] == "osv":
@@ -1407,17 +1570,35 @@ def main():
         return 0
     if len(args) == 2 and args[0] == "osv-scan":
         return osv_scan(args[1])
-    if args[:2] == ["schedule", "get"] and len(args) == 2:
+    if args == ["schedule", "get"]:
         sys.stdout.write(json.dumps(schedule_get()))
         return 0
-    if args == ["schedule", "off"]:
-        sys.stdout.write(json.dumps(schedule_off()))
+    if len(args) == 3 and args[:2] == ["schedule", "off"] and args[2] in keepwell_schedule.KINDS:
+        sys.stdout.write(json.dumps(schedule_off(args[2])))
         return 0
-    if len(args) == 5 and args[:2] == ["schedule", "set"]:
-        sys.stdout.write(json.dumps(schedule_set(args[2], args[3], args[4])))
+    if len(args) == 7 and args[:2] == ["schedule", "set"] and args[2] in keepwell_schedule.KINDS:
+        sys.stdout.write(json.dumps(schedule_set(*args[2:])))
+        return 0
+    if len(args) == 3 and args[:2] == ["schedule", "dismiss"] and args[2] in keepwell_schedule.KINDS:
+        slot = keepwell_schedule.status(_cap)[args[2]].get("missed")
+        if slot:
+            keepwell_schedule.save_run(args[2], dismissed=slot)
+        sys.stdout.write(json.dumps({"saved": True}))
+        return 0
+    if args == ["schedule", "missed-notify"]:
+        return missed_notify()
+    if len(args) == 3 and args[:2] == ["schedule", "run-now"] and args[2] in keepwell_schedule.KINDS:
+        sys.stdout.write(json.dumps(run_now(args[2])))
+        return 0
+    if len(args) in (2, 3) and args[0] == "run" and args[1] in keepwell_schedule.KINDS and args[2:] in ([], ["--scheduled"]):
+        return run(args[1], args[2:] == ["--scheduled"])
+    if len(args) >= 1 and args[0] == "alert":
+        sys.stdout.write(json.dumps(alert(args[1:])))
         return 0
     if args == ["report"]:
-        return report()
+        # The old single schedule's timer, until migration replaces it.
+        _migrate()
+        return 0
     if len(args) >= 2 and args[0] == "pending":
         out = pending(args[1:])
         if out is None:

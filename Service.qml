@@ -55,8 +55,13 @@ Scope {
     for (var i = 0; i < sections.length; i++) all = all.concat(sections[i].checks)
     return all
   }
-  readonly property string worst: doc ? Status.worst(allChecks) : "good"
-  readonly property string summary: Status.summary(allChecks)
+  // A missed scheduled run raises the shield to "Review" like a check would.
+  readonly property bool anyMissed: schedules.missed.length > 0
+  readonly property string worst: !doc ? "good"
+    : Status.worst(allChecks) === "crit" ? "crit" : anyMissed ? "attn" : Status.worst(allChecks)
+  readonly property string summary: anyMissed
+    ? "scheduled deep scan missed"
+    : Status.summary(allChecks)
 
   function findCheck(id) {
     for (var i = 0; i < allChecks.length; i++) if (allChecks[i].id === id) return allChecks[i]
@@ -74,11 +79,12 @@ Scope {
     if (checker.running) {
       // One run at a time; a request made meanwhile runs right after.
       queued = true
-      queuedNetwork = queuedNetwork || network
+      queuedNetwork = queuedNetwork === true || network === true ? true : (queuedNetwork || network)
       return
     }
     var argv = python.concat([sourceDir + "/bin/keepwell-check"])
-    if (network) argv.push("--network")
+    if (network === "auto") argv.push("--auto")
+    else if (network) argv.push("--network")
     checker.start(argv)
   }
 
@@ -129,8 +135,33 @@ Scope {
   // The check the window should show when it next opens (after a terminal).
   property string focusCheckId: ""
 
+  // Always on: the quick checks and arch-audit, at login and every hour while
+  // you're logged in. Local and read-only, except arch-audit's ~900 KB
+  // download (skipped on a metered connection). A check that newly needs
+  // attention changes the shield and sends one notification.
+  Timer {
+    interval: 3600 * 1000
+    repeat: true
+    running: true
+    onTriggered: root.check("auto")
+  }
+
+  // After every check: tell the runner what needs attention now; it
+  // notifies once for anything newly flagged.
+  BoundedProcess {
+    id: alerter
+    maxBytes: 1024
+    timeoutMs: 15000
+  }
+  function sendAlerts() {
+    if (!doc || alerter.running) return
+    var items = allChecks.filter(function(c) { return c.kind === "crit" || c.kind === "attn" })
+      .map(function(c) { return c.id + ":" + c.kind + "|" + c.title + ": " + c.status })
+    alerter.start(python.concat([sourceDir + "/bin/keepwell-run", "alert"], items))
+  }
+
   Component.onCompleted: {
-    check(false)
+    check("auto")
     pendingReader.start(python.concat([sourceDir + "/bin/keepwell-run", "pending", "get"]))
   }
 
@@ -408,79 +439,41 @@ Scope {
     }
   }
 
-  // ---------------- background checks ----------------
-  // The sheet edits a copy; Save writes it through keepwell-run, which
-  // writes the timer and enables it (no root, no terminal).
+  // ---------------- schedules ----------------
+  // The deep scans have an optional timer. A run missed because the computer
+  // was off or asleep is flagged (shield, one notification, a strip in the
+  // window), never run late.
+  readonly property var schedules: Present.schedules(doc, now)
   property bool schedOpen: false
-  property bool schedLoading: true
-  property bool schedEnabled: false
-  property var schedDays: []
-  property string schedTime: "10:00"
-  property var schedParts: []
+  property var schedQueue: []
+  property var schedFailed: []
 
-  function openSchedule() {
-    if (schedReader.running) return
-    schedLoading = true
-    schedOpen = true
-    schedReader.start(python.concat([sourceDir + "/bin/keepwell-run", "schedule", "get"]))
+  function openSchedule() { schedOpen = true }
+
+  // deep: { enabled, days, time, parts, battery }
+  function saveSchedules(deep) {
+    if (schedWriter.running || !deep) return
+    var cmds = []
+    if (deep.enabled && deep.days.length && deep.parts.length)
+      cmds.push(["set", "deep", deep.days.join(","), deep.time, deep.parts.join(","), deep.battery ? "on" : "off"])
+    else if (!deep.enabled && schedules.deep.enabled) cmds.push(["off", "deep"])
+    schedFailed = []
+    schedQueue = cmds
+    nextSchedCommand()
   }
 
-  BoundedProcess {
-    id: schedReader
-    maxBytes: 8192
-    timeoutMs: 10000
-    onFinished: function(ok, text) {
-      var d = null
-      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
-      if (!d || !Array.isArray(d.days) || typeof d.time !== "string" || !Array.isArray(d.parts)) {
-        root.schedOpen = false
-        root.say("Couldn't read the background check settings.")
-        return
-      }
-      root.schedEnabled = d.enabled === true
-      root.schedDays = d.days.filter(function(x) { return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"].indexOf(x) !== -1 })
-      root.schedTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(d.time) ? d.time : "10:00"
-      root.schedParts = d.parts.filter(function(x) { return ["vulns", "cleanup", "scan-downloads", "scan-home"].indexOf(x) !== -1 })
-      root.schedLoading = false
+  function nextSchedCommand() {
+    if (schedQueue.length === 0) {
+      schedOpen = false
+      say(schedFailed.length ? "Couldn't save: " + schedFailed.join("; ") : "Schedules saved.")
+      check(false)
+      return
     }
+    var next = schedQueue.slice()
+    var cmd = next.shift()
+    schedQueue = next
+    schedWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "schedule"], cmd))
   }
-
-  function toggleSchedDay(day) {
-    var all = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-    var next = schedDays.indexOf(day) === -1 ? schedDays.concat([day]) : schedDays.filter(function(x) { return x !== day })
-    schedDays = all.filter(function(x) { return next.indexOf(x) !== -1 })
-  }
-  function everySchedDay() {
-    schedDays = schedDays.length === 7 ? [] : ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-  }
-  function stepSchedTime(minutes) {
-    var hm = schedTime.split(":")
-    var total = (Number(hm[0]) * 60 + Number(hm[1]) + minutes + 1440) % 1440
-    var pad = function(n) { return (n < 10 ? "0" : "") + n }
-    schedTime = pad(Math.floor(total / 60)) + ":" + pad(total % 60)
-  }
-  function toggleSchedPart(part) {
-    var next = schedParts.indexOf(part) === -1 ? schedParts.concat([part]) : schedParts.filter(function(x) { return x !== part })
-    // One virus scan target at a time.
-    if (part === "scan-home" && next.indexOf("scan-home") !== -1) next = next.filter(function(x) { return x !== "scan-downloads" })
-    if (part === "scan-downloads" && next.indexOf("scan-downloads") !== -1) next = next.filter(function(x) { return x !== "scan-home" })
-    schedParts = next
-  }
-  function chooseScanTarget(target) {
-    var on = schedParts.indexOf("scan-downloads") !== -1 || schedParts.indexOf("scan-home") !== -1
-    if (!on) return
-    schedParts = schedParts.filter(function(x) { return x.indexOf("scan-") !== 0 }).concat(["scan-" + target])
-  }
-  function saveSchedule() {
-    if (!schedDays.length || !schedParts.length) return
-    scheduleRun(["set", schedDays.join(","), schedTime, schedParts.join(",")], "")
-  }
-  function scheduleRun(args, message) {
-    if (schedWriter.running) return
-    schedMessage = message
-    schedWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "schedule"], args))
-  }
-  property string schedMessage: ""
 
   BoundedProcess {
     id: schedWriter
@@ -489,15 +482,32 @@ Scope {
     onFinished: function(ok, text) {
       var d = null
       if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
-      if (d && d.saved === true) {
-        root.schedOpen = false
-        root.say(root.schedMessage || ("Background checks saved." + (typeof d.next === "string" ? " Next: " + d.next.replace(/:00 [A-Z]{2,5}$/, "") + "." : "")))
-      } else {
-        root.say(d && d.reason === "exists" ? "A keepwell-report unit that Keepwell didn't write is in the way; nothing was changed."
-                 : "Couldn't save the background checks.")
-      }
-      root.check(false)
+      if (!d || d.saved !== true)
+        root.schedFailed = root.schedFailed.concat([d && d.reason === "exists"
+          ? "a keepwell unit Keepwell didn't write is in the way" : "a schedule couldn't be written"])
+      root.nextSchedCommand()
     }
+  }
+
+  function runNow(kind) {
+    if (kind !== "deep") return
+    startJob(["schedule", "run-now", kind], "Running the deep scans in the background — you'll get a notification when they're done.")
+  }
+  function dismissMissed(kind) {
+    if (kind !== "deep") return
+    startJob(["schedule", "dismiss", kind], "")
+  }
+
+  // A missed run gets one notification; the runner remembers which.
+  BoundedProcess {
+    id: missedNotifier
+    maxBytes: 1024
+    timeoutMs: 15000
+  }
+  onDocChanged: {
+    sendAlerts()
+    if (schedules.missed.length && !missedNotifier.running)
+      missedNotifier.start(python.concat([sourceDir + "/bin/keepwell-run", "schedule", "missed-notify"]))
   }
 
   // ---------------- the terminal round trip ----------------
@@ -678,7 +688,7 @@ Scope {
         root.say(d.reason === "running" ? "A scan is already running." : d.reason === "folder"
                  ? "That folder can't be scanned." : "Couldn't start the scan.")
       else if (!d) root.say("Something went wrong starting that.")
-      else root.say(root.jobMessage)
+      else if (root.jobMessage !== "") root.say(root.jobMessage)
       root.check(false)
     }
   }
@@ -753,47 +763,14 @@ Scope {
       item.sections = Qt.binding(function() { return root.sections })
       item.checkedAt = Qt.binding(function() { return root.checkedAt })
       item.checking = Qt.binding(function() { return root.checking })
-      item.schedule = Qt.binding(function() { return Present.schedule(root.doc, root.now) })
+      item.schedules = Qt.binding(function() { return root.schedules })
+      item.tools = Qt.binding(function() { return root.doc && root.doc.probes && root.doc.probes.tools ? root.doc.probes.tools : ({}) })
       item.scheduleRequested.connect(root.openSchedule)
-      item.scheduleOffRequested.connect(function() { root.scheduleRun(["off"], "Background checks are off.") })
-      item.confirmOpen = Qt.binding(function() { return root.confirmOpen })
-      item.confirmPlan = Qt.binding(function() { return root.confirmPlan })
-      item.confirmFailed = Qt.binding(function() { return root.confirmFailed })
-      item.confirmSnapshot = Qt.binding(function() { return root.confirmSnapshot })
-      item.confirmContext = Qt.binding(function() { return root.confirmContext })
-      item.checkRequested.connect(function(network) { root.check(network) })
-      item.actionRequested.connect(function(action, checkId, context) { root.requestAction(action, checkId, context) })
-      item.confirmAccepted.connect(root.acceptConfirm)
-      item.confirmCanceled.connect(root.cancelConfirm)
-      item.confirmSnapshotToggled.connect(root.toggleSnapshot)
-      item.confirmOptionToggled.connect(root.toggleOption)
-      item.confirmAllToggled.connect(root.toggleAllOptions)
-      item.trashAllToggled.connect(root.toggleAllTrash)
-      item.trashOpen = Qt.binding(function() { return root.trashOpen })
-      item.trashTitle = Qt.binding(function() { return root.trashTitle })
-      item.trashContext = Qt.binding(function() { return root.trashContext })
-      item.trashItems = Qt.binding(function() { return root.trashItems })
-      item.trashFailed = Qt.binding(function() { return root.trashFailed })
-      item.trashBusy = Qt.binding(function() { return trasher.running })
-      item.trashChecked = Qt.binding(function() { return root.trashChecked })
-      item.trashDays = Qt.binding(function() { return root.trashDays })
-      item.trashDayChoices = Qt.binding(function() { return root.trashDayChoices })
-      item.trashDaysChosen.connect(root.chooseDays)
-      item.trashIgnored.connect(root.ignoreItem)
+      item.runNow.connect(root.runNow)
+      item.dismissMissed.connect(root.dismissMissed)
       item.schedOpen = Qt.binding(function() { return root.schedOpen })
-      item.schedLoading = Qt.binding(function() { return root.schedLoading })
       item.schedBusy = Qt.binding(function() { return schedWriter.running })
-      item.schedEnabled = Qt.binding(function() { return root.schedEnabled })
-      item.schedDays = Qt.binding(function() { return root.schedDays })
-      item.schedTime = Qt.binding(function() { return root.schedTime })
-      item.schedParts = Qt.binding(function() { return root.schedParts })
-      item.schedDayToggled.connect(root.toggleSchedDay)
-      item.schedEveryDay.connect(root.everySchedDay)
-      item.schedTimeStepped.connect(root.stepSchedTime)
-      item.schedPartToggled.connect(root.toggleSchedPart)
-      item.schedScanTargetChosen.connect(root.chooseScanTarget)
-      item.schedSaved.connect(root.saveSchedule)
-      item.schedTurnedOff.connect(function() { root.scheduleRun(["off"], "Background checks are off.") })
+      item.schedSaved.connect(root.saveSchedules)
       item.schedCanceled.connect(function() { root.schedOpen = false })
       item.trashToggled.connect(root.toggleTrashItem)
       item.trashAccepted.connect(root.confirmTrash)
