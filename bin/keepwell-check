@@ -510,6 +510,138 @@ def probe_disk():
             "baobab": exists("/usr/bin/baobab")}
 
 
+# Telemetry, analytics and crash-report hosts worth sinking in /etc/hosts.
+# The list is adapted from omarchy-black-ops by brightwalker25 (MIT).
+TELEMETRY_HOSTS = (
+    "http-intake.logs.us5.datadoghq.com", "o1158394.ingest.us.sentry.io",
+    "o33249.ingest.us.sentry.io", "telemetry.1passwordservices.com",
+    "core-sentry.1passwordservices.com", "usage-ping.brave.com",
+    "star-randsrv.bsg.brave.com", "incoming.telemetry.mozilla.org",
+    "google-analytics.com", "www.google-analytics.com", "ssl.google-analytics.com",
+    "region1.google-analytics.com", "analytics.google.com", "region1.analytics.google.com",
+)
+
+# Chromium policies that lower what the browser sends, none of which lowers
+# security (Safe Browsing and updates are left alone). Same source as above.
+CHROMIUM_POLICIES = {
+    "SearchSuggestEnabled": False, "NetworkPredictionOptions": 2,
+    "AlternateErrorPagesEnabled": False, "SpellCheckServiceEnabled": False,
+    "MetricsReportingEnabled": False, "UrlKeyedAnonymizedDataCollectionEnabled": False,
+    "BlockThirdPartyCookies": True, "WebRtcIPHandling": "default_public_interface_only",
+    "PrivacySandboxAdTopicsEnabled": False, "PrivacySandboxSiteEnabledAdsEnabled": False,
+    "PrivacySandboxAdMeasurementEnabled": False, "PasswordLeakDetectionEnabled": False,
+    "BackgroundModeEnabled": False, "EnableMediaRouter": False,
+}
+
+BLACK_OPS_HOSTS_MARK = b"# BEGIN black-ops"
+
+
+def _ini(text_value):
+    """Last value per 'section.key' in INI-style text, comments skipped."""
+    out, section = {}, ""
+    for raw in text_value.splitlines()[:5000]:
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[section + "." + k.strip()] = v.strip()
+    return out
+
+
+def _session_env():
+    _, out = text(["/usr/bin/systemctl", "--user", "show-environment"], timeout=3, cap=256 * 1024)
+    env = {}
+    for line in out.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            if k in ("DO_NOT_TRACK", "DEBUGINFOD_URLS"):
+                env[k] = v
+    return env
+
+
+def probe_network_privacy():
+    p = {"blackOps": os.path.isdir(os.path.join(HOME, ".local", "state", "omarchy-black-ops"))}
+
+    hosts = read_file("/etc/hosts", 1 << 20) or b""
+    sunk = set()
+    for line in hosts.decode("utf-8", "replace").splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) >= 2 and parts[0] in ("0.0.0.0", "127.0.0.1", "::", "::1"):
+            sunk.update(h for h in parts[1:] if h in TELEMETRY_HOSTS)
+    p["hosts"] = {"blocked": len(sunk), "total": len(TELEMETRY_HOSTS),
+                  "blackOps": BLACK_OPS_HOSTS_MARK in hosts}
+
+    if unit_state("systemd-resolved.service")[1] == "active":
+        _, cfg = text(["/usr/bin/systemd-analyze", "cat-config", "systemd/resolved.conf"], timeout=4, cap=256 * 1024)
+        value = _ini(cfg).get("Resolve.FallbackDNS")
+        p["fallbackDns"] = "default" if value is None else ("off" if value == "" else "custom")
+        p["fallbackDnsBlackOps"] = os.path.isfile("/etc/systemd/resolved.conf.d/no-fallback.conf")
+    else:
+        p["fallbackDns"] = None
+
+    if unit_state("NetworkManager.service")[1] == "active":
+        _, cfg = text(["/usr/bin/NetworkManager", "--print-config"], timeout=4, cap=256 * 1024)
+        nm = _ini(cfg)
+        enabled = nm.get("connectivity.enabled", "true").lower() not in ("false", "0", "no")
+        uri = nm.get("connectivity.uri", "")
+        p["connectivity"] = "on" if enabled and uri else "off"
+        p["connectivityHost"] = clean(re.sub(r"^[a-z]+://([^/]+).*$", r"\1", uri), 64) if uri else ""
+        mac = nm.get("connection.wifi.cloned-mac-address", "")
+        p["identity"] = {
+            "mac": mac in ("stable", "random") and nm.get("connection.ethernet.cloned-mac-address", "") in ("stable", "random"),
+            "hostname": nm.get("connection.ipv4.dhcp-send-hostname", "") in ("0", "false", "no"),
+            "ipv6Privacy": nm.get("connection.ipv6.ip6-privacy", "") == "2",
+        }
+        p["nmBlackOps"] = any(os.path.isfile("/etc/NetworkManager/conf.d/" + n)
+                              for n in ("90-black-ops-identity.conf", "90-black-ops-connectivity.conf"))
+    else:
+        p["connectivity"] = None
+        p["identity"] = None
+
+    if unit_state("avahi-daemon.service")[1] == "active":
+        conf = (read_file("/etc/avahi/avahi-daemon.conf", 256 * 1024) or b"").decode("utf-8", "replace")
+        p["avahiAnnounces"] = _ini(conf).get("publish.disable-publishing", "no").lower() != "yes"
+        p["avahiBlackOps"] = "black-ops" in conf
+    else:
+        p["avahiAnnounces"] = None
+
+    env = _session_env()
+    p["debuginfod"] = bool(env.get("DEBUGINFOD_URLS", "").strip(" '$"))
+    p["doNotTrack"] = env.get("DO_NOT_TRACK") == "1"
+    return p
+
+
+def probe_chromium_policy():
+    """Which of the privacy policies are in force from managed policy files."""
+    base = "/etc/chromium/policies/managed"
+    merged, black_ops, files = {}, False, 0
+    try:
+        with os.scandir(base) as it:
+            names = sorted(e.name for n, e in enumerate(it) if n < 50 and e.name.endswith(".json"))
+    except OSError:
+        names = []
+    for name in names[:20]:
+        raw = read_file(os.path.join(base, name), 256 * 1024)
+        if raw is None:
+            continue
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(doc, dict):
+            files += 1
+            black_ops = black_ops or name == "black-ops.json"
+            for k, want in CHROMIUM_POLICIES.items():
+                if k in doc:
+                    merged[k] = doc[k] == want
+    return {"set": sum(1 for v in merged.values() if v), "total": len(CHROMIUM_POLICIES),
+            "files": files, "blackOps": black_ops}
+
+
 def probe_tools():
     return {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
 
@@ -528,6 +660,8 @@ def main():
                      ("media", lambda: probe_media(procs)),
                      ("permissions", probe_permissions),
                      ("browser", lambda: probe_browser(procs)),
+                     ("chromiumPolicy", probe_chromium_policy),
+                     ("netPrivacy", probe_network_privacy),
                      ("apps", probe_apps),
                      ("traces", probe_traces),
                      ("snapshots", probe_snapshots),

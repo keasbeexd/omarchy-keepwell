@@ -87,6 +87,8 @@ deadline and an output cap; the helper prints one JSON document of at most
 | System updates | the last 1 MiB of `/var/log/pacman.log` | — |
 | Camera & microphone | — | `pw-dump` |
 | Browser telemetry | `~/.config/chromium/Local State`, `~/.config/chromium/Default/Preferences` (three keys); the names (`/proc/<pid>/comm`) of your own processes, to see whether Chromium is running | — |
+| Browser privacy policy | `/etc/chromium/policies/managed/*.json` | — |
+| Network privacy | `/etc/hosts`, `/etc/avahi/avahi-daemon.conf`, whether `/etc/systemd/resolved.conf.d/no-fallback.conf` and `/etc/NetworkManager/conf.d/90-black-ops-*.conf` exist, whether `~/.local/state/omarchy-black-ops` exists | `systemctl is-active systemd-resolved NetworkManager avahi-daemon`, `systemd-analyze cat-config systemd/resolved.conf`, `NetworkManager --print-config`, `systemctl --user show-environment` (only `DO_NOT_TRACK` and `DEBUGINFOD_URLS` are kept) |
 | Data from your apps | `~/.config/Code/User/settings.json` (one key) | — |
 | Activity traces | counts in `~/.local/share/recently-used.xbel`, `~/.bash_history`; size of `~/.cache/thumbnails` | — |
 | App permissions | — | `flatpak list --app` |
@@ -118,6 +120,13 @@ omarchy plugin remove keasbeexd.keepwell
 
 This removes the plugin directory and its bar entry. Keepwell creates no other
 files, so nothing is left behind.
+
+## Credits
+
+The list of telemetry hosts and the set of Chromium privacy policies come from
+[omarchy-black-ops](https://github.com/brightwalker25/omarchy-black-ops) by
+brightwalker25 (MIT). Where Black Ops has applied a setting, Keepwell shows it
+as "managed by Black Ops" and leaves it alone.
 
 ## Licence
 

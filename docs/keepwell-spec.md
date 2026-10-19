@@ -214,3 +214,13 @@ Every tile helper is a bounded process: argv-array commands only (no shell-strin
 3. ClamTK `nvdata` exact key names for scheduled scans — verify against current ClamTK version before coding the adapter.
 4. Chromium `Local State` vs. `Preferences` file responsibility per key (crash/metrics split).
 5. Decide cross-link behavior with `omarchy-snapshots` (launch? button-as-link? README mention only).
+
+---
+
+## 11. Amendments (2026-10-19)
+
+1. **Plugin ID** is `keasbeexd.keepwell`: the shell rejects third-party IDs in the reserved `omarchy.*` namespace.
+2. **ClamTK dropped.** ClamTK is no longer maintained (its README says so), and its scheduler writes user-crontab lines (`# clamtk-scan`, `# clamtk-defs`), not `~/.clamtk/nvdata` — and Omarchy ships no `crontab`. Keepwell offers ClamAV alone: definitions via `clamav-freshclam`, scans run from Keepwell in a visible terminal. §3.1's ClamTK adapter and §6's ClamTK row no longer apply.
+3. **Checks at shell start** — one local, read-only check so the bar icon is meaningful; arch-audit (network) only on explicit request.
+4. **Network privacy (new, Privacy tab)** — six optional settings adapted from omarchy-black-ops: telemetry hosts in `/etc/hosts`, empty `FallbackDNS`, NetworkManager connectivity check off, private MAC + no DHCP hostname, Avahi publishing off, debuginfod off. Plus the Chromium managed privacy policy (on the Browser telemetry check) and `DO_NOT_TRACK` (on Data from your apps). Shown as Info, never as a problem. Settings Black Ops applied are shown as "managed by Black Ops" and never touched. Black Ops' watchdog and listen mode are out of scope.
+5. **Snapshots** — `snapper list` and `/.snapshots` are root-only, so the tile shows setup and Limine sync state only; the count is left to the `omarchy-snapshots` plugin.
