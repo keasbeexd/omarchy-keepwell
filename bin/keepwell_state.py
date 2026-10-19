@@ -209,3 +209,114 @@ def latest_log():
     if not logs:
         return None
     return logs[-1], read(logs[-1], sub="clamav", cap=64 * 1024)
+
+
+# ---------------------------------------------------------------- user config
+# The background-check timer's unit files live where systemd looks for them,
+# ~/.config/systemd/user. Same care as above, except that these folders are
+# yours rather than Keepwell's, so their permissions are left alone.
+
+UNIT_PARTS = (".config", "systemd", "user")
+UNIT_NAME = re.compile(r"keepwell-[a-z]{1,20}\.(service|timer)")
+UNIT_MARK = b"# Written by the Keepwell plugin"
+
+
+def _unit_dir(create):
+    fd = os.open(os.path.expanduser("~"), DIR_FLAGS)
+    try:
+        for name in UNIT_PARTS:
+            try:
+                nfd = os.open(name, DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(fd)
+                    return None
+                os.mkdir(name, 0o755, dir_fd=fd)
+                nfd = os.open(name, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+            _check_dir(fd, False)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def write_unit(name, data):
+    """Write one of Keepwell's unit files. Refuses to replace a file of that
+    name that Keepwell didn't write."""
+    if not UNIT_NAME.fullmatch(name) or not data.startswith(UNIT_MARK):
+        raise ValueError("bad unit")
+    dirfd = _unit_dir(True)
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+            try:
+                if not os.read(fd, len(UNIT_MARK)).startswith(UNIT_MARK):
+                    raise PermissionError("%s exists and isn't Keepwell's" % name)
+            finally:
+                os.close(fd)
+        except FileNotFoundError:
+            pass
+        tmp = ".%s.%s.tmp" % (name, secrets.token_hex(8))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=dirfd)
+        try:
+            os.fchmod(fd, 0o644)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        except BaseException:
+            os.unlink(tmp, dir_fd=dirfd)
+            raise
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+
+
+def unit_free(name):
+    """True when Keepwell may write this unit: absent, or written by Keepwell."""
+    if not UNIT_NAME.fullmatch(name):
+        return False
+    dirfd = _unit_dir(False)
+    if dirfd is None:
+        return True
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        try:
+            return os.read(fd, len(UNIT_MARK)).startswith(UNIT_MARK)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
+
+
+def remove_unit(name):
+    """Remove one of Keepwell's unit files, only if Keepwell wrote it."""
+    if not UNIT_NAME.fullmatch(name):
+        raise ValueError("bad unit")
+    dirfd = _unit_dir(False)
+    if dirfd is None:
+        return
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+        except FileNotFoundError:
+            return
+        try:
+            ours = os.read(fd, len(UNIT_MARK)).startswith(UNIT_MARK)
+        finally:
+            os.close(fd)
+        if ours:
+            os.unlink(name, dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
