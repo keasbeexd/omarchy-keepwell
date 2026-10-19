@@ -177,6 +177,10 @@ Scope {
       return
     }
     if (action.trashSet) { openTrash(action.trashSet, action.label, context); return }
+    if (action.unignore === "unclaimed") {
+      startJob(["unclaimed", "unignore"], "Ignored folders will be suggested again.")
+      return
+    }
     say("“" + action.label + "” arrives in the next build.")
   }
 
@@ -286,15 +290,20 @@ Scope {
   property var trashItems: null
   property bool trashFailed: false
   property var trashChecked: ({})
+  // The unclaimed finder's age setting, from its listing.
+  property int trashDays: 0
+  property var trashDayChoices: []
 
   function openTrash(set, label, context) {
     if (lister.running || trasher.running) return
     trashSet = set
-    trashTitle = set === "cache" ? "Clear app caches" : "Clear activity traces"
+    trashTitle = set === "cache" ? "Clear app caches" : set === "unclaimed" ? "Unclaimed app folders" : "Clear activity traces"
     trashContext = context
     trashItems = null
     trashFailed = false
     trashChecked = ({})
+    trashDays = 0
+    trashDayChoices = []
     trashOpen = true
     lister.start(python.concat([sourceDir + "/bin/keepwell-run", "list", set]))
   }
@@ -323,6 +332,33 @@ Scope {
 
   function cancelTrash() { if (!trasher.running) trashOpen = false }
 
+  // Unclaimed: a new age or an ignored folder is saved, then listed again.
+  function relistAfter(args) {
+    if (settingsWriter.running || lister.running) return
+    settingsWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "unclaimed"], args))
+  }
+  function chooseDays(days) {
+    if ([90, 180, 365, 730].indexOf(days) === -1 || days === trashDays) return
+    trashDays = days
+    relistAfter(["days", String(days)])
+  }
+  function ignoreItem(id) {
+    if (!/^[A-Za-z0-9._@+ \/-]{1,200}$/.test(id)) return
+    trashItems = (trashItems || []).filter(function(i) { return i.id !== id })
+    relistAfter(["ignore", id])
+  }
+  BoundedProcess {
+    id: settingsWriter
+    maxBytes: 4096
+    timeoutMs: 10000
+    onFinished: {
+      root.trashItems = null
+      root.trashChecked = ({})
+      lister.start(root.python.concat([root.sourceDir + "/bin/keepwell-run", "list", "unclaimed"]))
+      root.check(false)
+    }
+  }
+
   BoundedProcess {
     id: lister
     maxBytes: 64 * 1024
@@ -335,8 +371,13 @@ Scope {
           return i && typeof i.id === "string" && i.id.length <= 128 && typeof i.label === "string"
             && typeof i.path === "string" && typeof i.bytes === "number" && isFinite(i.bytes)
         })
-      if (valid) root.trashItems = d.items
-      else root.trashFailed = true
+      if (valid) {
+        root.trashItems = d.items
+        if (root.trashSet === "unclaimed" && [90, 180, 365, 730].indexOf(d.days) !== -1) {
+          root.trashDays = d.days
+          root.trashDayChoices = [90, 180, 365, 730]
+        }
+      } else root.trashFailed = true
     }
   }
 
@@ -631,6 +672,10 @@ Scope {
       item.trashFailed = Qt.binding(function() { return root.trashFailed })
       item.trashBusy = Qt.binding(function() { return trasher.running })
       item.trashChecked = Qt.binding(function() { return root.trashChecked })
+      item.trashDays = Qt.binding(function() { return root.trashDays })
+      item.trashDayChoices = Qt.binding(function() { return root.trashDayChoices })
+      item.trashDaysChosen.connect(root.chooseDays)
+      item.trashIgnored.connect(root.ignoreItem)
       item.trashToggled.connect(root.toggleTrashItem)
       item.trashAccepted.connect(root.confirmTrash)
       item.trashCanceled.connect(root.cancelTrash)

@@ -46,6 +46,10 @@ Item {
   property var trashChecked: ({})
   signal trashToggled(string id)
   signal trashAllToggled()
+  property int trashDays: 0
+  property var trashDayChoices: []
+  signal trashDaysChosen(int days)
+  signal trashIgnored(string id)
   signal trashAccepted()
   signal trashCanceled()
 
@@ -412,6 +416,10 @@ Item {
           checked: root.trashChecked
           onToggled: function(id) { root.trashToggled(id) }
           onAllToggled: root.trashAllToggled()
+          days: root.trashDays
+          dayChoices: root.trashDayChoices
+          onDaysChosen: function(d) { root.trashDaysChosen(d) }
+          onIgnored: function(id) { root.trashIgnored(id) }
           onConfirmed: root.trashAccepted()
           onCanceled: root.trashCanceled()
         }

@@ -7,30 +7,41 @@ import "../model/Present.js" as Present
 // the Trash, so this sheet is the confirm step itself.
 //
 // The heading and the buttons stay put; only the list scrolls, and it
-// follows the keyboard cursor.
+// follows the keyboard cursor. For unclaimed folders the sheet also shows
+// how long each has been untouched, an age choice, and "Ignore" per row.
 Item {
   id: root
 
   property bool opened: false
   property string title: ""
   property string context: ""
-  property var items: null          // [{ id, label, path, bytes, complete }] or null while loading
+  property var items: null          // [{ id, label, path, bytes, complete, days? }] or null while loading
   property bool failed: false
   property bool busy: false
   property var checked: ({})        // id -> true
+  property int days: 0              // unclaimed: the age chosen
+  property var dayChoices: []       // unclaimed: the ages offered
 
   signal toggled(string id)
   signal allToggled()
   signal confirmed()
   signal canceled()
+  signal daysChosen(int days)
+  signal ignored(string id)
 
   readonly property var list: items || []
+  readonly property bool unclaimed: dayChoices.length > 0
   readonly property var chosen: list.filter(function(i) { return root.checked[i.id] === true })
   readonly property real chosenBytes: chosen.reduce(function(n, i) { return n + (i.bytes || 0) }, 0)
   readonly property bool allChecked: list.length > 0 && chosen.length === list.length
-  // Keyboard cursor: 0 is "Select all", rows are 1…n, then the buttons.
-  readonly property int cancelIndex: list.length + 1
-  readonly property int confirmIndex: list.length + 2
+
+  // Keyboard cursor over one flat list: the age choice (unclaimed only),
+  // "Select all", each row, Cancel, Move.
+  readonly property int ageIndex: unclaimed ? 0 : -1
+  readonly property int allIndex: unclaimed ? 1 : 0
+  readonly property int firstRow: allIndex + 1
+  readonly property int cancelIndex: firstRow + list.length
+  readonly property int confirmIndex: cancelIndex + 1
   property int cursor: 0
 
   visible: opened
@@ -38,12 +49,30 @@ Item {
   onCursorChanged: follow()
 
   function follow() {
-    if (cursor === 0) { flick.contentY = 0; return }
-    var row = rows.itemAt(cursor - 1)
+    if (cursor < firstRow) { flick.contentY = 0; return }
+    var row = rows.itemAt(cursor - firstRow)
     if (!row) return
     var top = row.y, bottom = row.y + row.height
     if (top < flick.contentY) flick.contentY = top
     else if (bottom > flick.contentY + flick.height) flick.contentY = bottom - flick.height
+  }
+
+  function ageText(d) {
+    if (d >= 730) return Math.floor(d / 365) + " years"
+    if (d >= 365) return "over a year"
+    return Math.round(d / 30) + " months"
+  }
+
+  // The next cursor stop, skipping "Select all" while it is hidden.
+  function step(d) {
+    var next = Math.max(0, Math.min(confirmIndex, cursor + d))
+    if (next === allIndex && list.length <= 1) next = Math.max(0, Math.min(confirmIndex, next + d))
+    return next
+  }
+
+  function stepDays(delta) {
+    var at = dayChoices.indexOf(days) + delta
+    if (at >= 0 && at < dayChoices.length) daysChosen(dayChoices[at])
   }
 
   Rectangle {
@@ -54,7 +83,7 @@ Item {
 
   Rectangle {
     anchors.centerIn: parent
-    width: Math.min(Tokens.sp(640), parent.width - Tokens.sp(48))
+    width: Math.min(Tokens.sp(680), parent.width - Tokens.sp(48))
     height: Math.min(layout.implicitHeight + Tokens.sp(48), parent.height - Tokens.sp(48))
     color: Tokens.bg
     radius: Tokens.radius
@@ -88,11 +117,42 @@ Item {
         KText {
           Layout.fillWidth: true
           text: root.failed ? "Couldn't list these right now. Nothing was moved."
-            : root.items === null ? "Measuring…"
-            : root.list.length === 0 ? "There is nothing here to clear."
+            : root.items === null ? "Looking…"
+            : root.list.length === 0 ? (root.unclaimed ? "No unclaimed folder has been untouched that long." : "There is nothing here to clear.")
+            : root.unclaimed ? "Nothing installed uses these, and nothing in them has changed for a long time. Check each one before ticking it — a folder can still hold something you want."
             : "Tick what to move to Trash. Apps rebuild their caches when they need them, which can make them a little slower the first time."
           color: Tokens.fg2
           wrapMode: Text.WordWrap
+        }
+      }
+
+      // Unclaimed: how long a folder must be untouched to be suggested.
+      Rectangle {
+        visible: root.unclaimed
+        Layout.fillWidth: true
+        implicitHeight: ageRow.implicitHeight + Tokens.sp(12)
+        radius: Tokens.radius
+        color: "transparent"
+        border.width: root.cursor === root.ageIndex ? Tokens.border : 0
+        border.color: Tokens.fg
+        RowLayout {
+          id: ageRow
+          anchors.verticalCenter: parent.verticalCenter
+          x: Tokens.sp(6)
+          width: parent.width - Tokens.sp(12)
+          spacing: Tokens.sp(6)
+          KText { text: "Untouched for at least"; color: Tokens.fg2 }
+          Repeater {
+            model: root.dayChoices
+            delegate: ActionButton {
+              required property var modelData
+              label: Present.ageWords(modelData)
+              primary: modelData === root.days
+              enabledAction: !root.busy
+              onActivated: root.daysChosen(modelData)
+            }
+          }
+          Item { Layout.fillWidth: true }
         }
       }
 
@@ -102,8 +162,8 @@ Item {
         label: "Select all"
         hint: "(" + root.list.length + ")"
         checked: root.allChecked
-        hasCursor: root.cursor === 0
-        onToggled: { root.cursor = 0; root.allToggled() }
+        hasCursor: root.cursor === root.allIndex
+        onToggled: { root.cursor = root.allIndex; root.allToggled() }
       }
 
       Flickable {
@@ -131,17 +191,22 @@ Item {
               required property int index
               width: rowsCol.width
               height: Math.max(box.implicitHeight, pathText.implicitHeight + labelText.implicitHeight) + Tokens.sp(14)
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: { root.cursor = root.firstRow + index; root.toggled(modelData.id) }
+              }
               CheckBox {
                 id: box
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 checked: root.checked[modelData.id] === true
-                hasCursor: root.cursor === index + 1
+                hasCursor: root.cursor === root.firstRow + index
                 onToggled: root.toggled(modelData.id)
               }
               Column {
                 anchors.left: box.right
-                anchors.right: size.left
+                anchors.right: rightSide.left
                 anchors.leftMargin: Tokens.sp(4)
                 anchors.rightMargin: Tokens.sp(12)
                 anchors.verticalCenter: parent.verticalCenter
@@ -149,23 +214,29 @@ Item {
                 KText {
                   id: pathText
                   width: parent.width
-                  text: modelData.path
+                  text: modelData.path + (typeof modelData.days === "number" ? " · untouched for " + root.ageText(modelData.days) : "")
                   font.pixelSize: Tokens.small
                   color: Tokens.fg3
                   elide: Text.ElideMiddle
                 }
               }
-              KText {
-                id: size
+              Row {
+                id: rightSide
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: Present.bytes(modelData.bytes) + (modelData.complete ? "" : "+")
-                color: Tokens.fg2
-              }
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: { root.cursor = index + 1; root.toggled(modelData.id) }
+                spacing: Tokens.sp(10)
+                KText {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Present.bytes(modelData.bytes) + (modelData.complete ? "" : "+")
+                  color: Tokens.fg2
+                }
+                ActionButton {
+                  visible: root.unclaimed
+                  anchors.verticalCenter: parent.verticalCenter
+                  label: "Ignore"
+                  enabledAction: !root.busy
+                  onActivated: root.ignored(modelData.id)
+                }
               }
               Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Tokens.line }
             }
@@ -176,7 +247,9 @@ Item {
       KText {
         Layout.fillWidth: true
         visible: root.list.length > 0
-        text: "Moved items stay in the Trash, where you can restore them. Their space is freed when you empty the Trash."
+        text: root.unclaimed
+          ? "Ignore never suggests a folder again (undo on the check). Moved items stay in the Trash, where you can restore them; their space is freed when you empty it."
+          : "Moved items stay in the Trash, where you can restore them. Their space is freed when you empty the Trash."
         font.pixelSize: Tokens.small
         color: Tokens.fg3
         wrapMode: Text.WordWrap
@@ -197,7 +270,7 @@ Item {
           onActivated: root.canceled()
         }
         ActionButton {
-          label: root.busy ? "Moving…" : "Move " + (root.chosen.length || "") + " to Trash"
+          label: root.busy ? "Moving…" : root.chosen.length ? "Move " + root.chosen.length + " to Trash" : "Move to Trash"
           primary: true
           trash: true
           enabledAction: root.chosen.length > 0 && !root.busy
@@ -208,24 +281,27 @@ Item {
     }
   }
 
-  // Up/Down walk the rows and then the buttons; Tab jumps straight to the
-  // buttons and back, so a long list doesn't have to be walked to reach them.
+  // Up/Down walk the age choice, "Select all", the rows and then the
+  // buttons; Left/Right change the age while it has the cursor; Tab jumps
+  // to the buttons and back; I ignores the row under the cursor.
   function handleKey(event) {
     if (root.busy) return true
     var k = event.key
+    var onRow = root.cursor >= root.firstRow && root.cursor < root.cancelIndex
     if (k === Qt.Key_Escape) root.canceled()
-    else if (k === Qt.Key_Up || k === Qt.Key_K || k === Qt.Key_Left || k === Qt.Key_H)
-      root.cursor = Math.max(0, root.cursor - 1)
-    else if (k === Qt.Key_Down || k === Qt.Key_J || k === Qt.Key_Right || k === Qt.Key_L)
-      root.cursor = Math.min(root.confirmIndex, root.cursor + 1)
+    else if (root.cursor === root.ageIndex && (k === Qt.Key_Left || k === Qt.Key_H)) root.stepDays(-1)
+    else if (root.cursor === root.ageIndex && (k === Qt.Key_Right || k === Qt.Key_L)) root.stepDays(1)
+    else if (k === Qt.Key_Up || k === Qt.Key_K || k === Qt.Key_Left || k === Qt.Key_H) root.cursor = root.step(-1)
+    else if (k === Qt.Key_Down || k === Qt.Key_J || k === Qt.Key_Right || k === Qt.Key_L) root.cursor = root.step(1)
     else if (k === Qt.Key_Tab) root.cursor = root.cursor < root.cancelIndex ? root.confirmIndex : 0
     else if (k === Qt.Key_Backtab) root.cursor = root.cursor < root.cancelIndex ? root.cancelIndex : 0
     else if (k === Qt.Key_A && (event.modifiers & Qt.ControlModifier)) root.allToggled()
+    else if (k === Qt.Key_I && root.unclaimed && onRow) root.ignored(root.list[root.cursor - root.firstRow].id)
     else if (k === Qt.Key_Space || k === Qt.Key_Return || k === Qt.Key_Enter) {
-      if (root.cursor === 0) root.allToggled()
-      else if (root.cursor <= root.list.length) root.toggled(root.list[root.cursor - 1].id)
+      if (root.cursor === root.allIndex) root.allToggled()
+      else if (onRow) root.toggled(root.list[root.cursor - root.firstRow].id)
       else if (root.cursor === root.cancelIndex) root.canceled()
-      else if (root.chosen.length > 0) root.confirmed()
+      else if (root.cursor === root.confirmIndex && root.chosen.length > 0) root.confirmed()
     } else return false
     return true
   }
