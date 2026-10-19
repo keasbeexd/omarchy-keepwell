@@ -261,7 +261,7 @@ Item {
               color: Tokens.fg3
             }
             ActionButton {
-              label: "Check again"
+              label: "Refresh"
               enabledAction: !root.checking
               onActivated: { root.notice = ""; root.checkRequested(true) }
             }

@@ -342,7 +342,9 @@ function deps(tools, now) {
   return check(b, {
     kind: fixable.length ? "attn" : f.length ? "info" : "good",
     status: f.length ? plural(f.length, "dependency has", "dependencies have") + " known vulnerabilities"
-      : last.scanned ? "No known vulnerabilities in your projects' dependencies" : "No projects found in that folder",
+      : !last.scanned ? "No projects found in that folder"
+      : last.noLockfiles >= last.scanned ? "Nothing to check: no dependency files in " + plural(last.scanned, "project", "projects")
+      : "No known vulnerabilities in your projects' dependencies",
     meta: (fixable.length ? fixable.length + " fixable by updating · " : "") + "scanned " + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects"),
     facts: facts,
     note: f.length ? "Each row is a library one of your projects uses, the worst problem it has, and the version that fixes it. Update it in that project (for example npm update, cargo update, go get -u, pip install -U), then scan again. Click a row for the advisory on osv.dev. Keepwell never changes your projects. " + network : network,
@@ -463,7 +465,7 @@ function apps(p, net) {
 function media(p) {
   var b = CATALOG.cam
   var note = "A sliding camera cover or hardware mute switch is the only guarantee. Software can only report."
-  if (p.error) return check(b, { kind: "off", status: "Couldn't read PipeWire", meta: "Check again in a moment", note: note })
+  if (p.error) return check(b, { kind: "off", status: "Couldn't read PipeWire", meta: "Refresh in a moment", note: note })
   var mic = p.micUsers || [], cam = p.cameraUsers || []
   var busy = mic.length + cam.length > 0
   var parts = []
@@ -539,7 +541,7 @@ function ageWords(days) { return AGE_WORDS[days] || plural(days, "day", "days") 
 
 function unclaimed(p) {
   var b = CATALOG.unclaimed
-  if (typeof p.count !== "number") return check(b, { kind: "off", status: "Couldn't look this time", meta: "Try Check again" })
+  if (typeof p.count !== "number") return check(b, { kind: "off", status: "Couldn't look this time", meta: "Try Refresh" })
   var review = { label: "Review…", primary: p.count > 0, trash: true, trashSet: "unclaimed" }
   var facts = [
     fact("Looked at", plural(p.looked, "app folder", "app folders") + " nothing installed claims", "~, ~/.config, ~/.local/share"),
@@ -685,7 +687,7 @@ function build(doc, now) {
         clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
-        return check(CATALOG[id], { kind: "off", status: "Couldn't check this time", meta: "Try Check again" })
+        return check(CATALOG[id], { kind: "off", status: "Couldn't check this time", meta: "Try Refresh" })
       try { return makers[id]() } catch (e) { return check(CATALOG[id], { kind: "off", status: "Couldn't check this time" }) }
     })
     out.push({ id: s.id, name: s.name, checks: checks, hero: probes ? hero(s, checks) : {

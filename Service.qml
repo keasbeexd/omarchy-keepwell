@@ -14,7 +14,7 @@ import "model/Status.js" as Status
 // When checks run:
 //   - once when the shell starts, so the bar icon means something;
 //   - when the window opens, if the last result is over a minute old;
-//   - when you press "Check again", and after an action's terminal closes.
+//   - when you press "Refresh", and after an action's terminal closes.
 // All of these are local and read-only. arch-audit, which downloads the Arch
 // security tracker data, runs only when you ask for it. Nothing repeats on a
 // timer.

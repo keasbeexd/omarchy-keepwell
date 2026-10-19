@@ -71,8 +71,9 @@ omarchy-shell keepwell toggle
 
 - Once when the shell starts, so the bar icon is meaningful.
 - When you open the window, if the last result is more than a minute old.
-- When you press **Check again**, after an action's terminal closes, and
-  when a background scan ends.
+- When you press **Refresh** (it re-reads the quick checks; the long scans —
+  virus, secrets, dependencies — have their own buttons), after an action's
+  terminal closes, and when a background scan ends.
 - Every 15 seconds while a scan you started is running **and** the window is
   open, so you see it end. Nothing polls otherwise.
 - On the schedule you set under **Background checks**, if you turn them on
@@ -119,7 +120,8 @@ when you ask:
 
 - **Known vulnerabilities** runs `arch-audit`, which downloads Arch's public
   security data from `https://security.archlinux.org` (on **Check now** or
-  **Check again** — never at startup or on opening the window).
+  **Check again** on that check, or **Refresh** — never at startup or on
+  opening the window).
 - **Dependency vulnerabilities** runs `osv-scanner`, which sends your
   projects' dependency names and versions to Google's OSV.dev service, only
   when you press a scan button. Clicking a row opens its advisory on

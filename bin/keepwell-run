@@ -79,8 +79,8 @@ DISPLAY_ENV = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DES
                "DBUS_SESSION_BUS_ADDRESS", "XCURSOR_SIZE", "XCURSOR_THEME", "GTK_THEME", "HOME", "LANG")
 
 
-def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok=(0,)):
-    """stdout of argv as text, or "" on failure, overrun or overflow. ok:
+def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,)):
+    """stdout of argv as text, or "" on failure, overrun or overflow. ok_codes:
     exit codes that count as success (some scanners exit 1 when they find
     something)."""
     env = {"PATH": "/usr/bin", "LC_ALL": "C"}
@@ -126,7 +126,7 @@ def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok=(0,)):
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
         return ""
-    return b"".join(chunks).decode("utf-8", "replace") if proc.returncode in ok else ""
+    return b"".join(chunks).decode("utf-8", "replace") if proc.returncode in ok_codes else ""
 
 
 def human(n):
@@ -873,9 +873,13 @@ def _fixed_in(record, name):
         if not isinstance(aff, dict) or (aff.get("package") or {}).get("name") != name:
             continue
         for rng in aff.get("ranges") or []:
-            for ev in (rng or {}).get("events") or []:
+            # GIT ranges name commits, not versions anyone can update to.
+            if not isinstance(rng, dict) or rng.get("type") == "GIT":
+                continue
+            for ev in rng.get("events") or []:
                 fixed = (ev or {}).get("fixed")
-                if isinstance(fixed, str) and re.fullmatch(r"[A-Za-z0-9.+~_:-]{1,64}", fixed) and fixed not in out:
+                if isinstance(fixed, str) and re.fullmatch(r"[A-Za-z0-9.+~_:-]{1,64}", fixed) \
+                        and not re.fullmatch(r"[0-9a-f]{40}", fixed) and fixed not in out:
                     out.append(fixed)
     return out[:3]
 
@@ -894,12 +898,23 @@ def _osv_findings(doc, repo, root):
             vulns = []
             for g in groups[:50]:
                 ids = [str(i) for i in g["ids"] if isinstance(i, str)]
-                record = next((records[i] for i in ids if i in records), {})
-                aliases = ids + [str(a) for a in (record.get("aliases") or []) if isinstance(a, str)]
+                group_records = [records[i] for i in ids if i in records]
+                record = group_records[0] if group_records else {}
+                aliases = ids + [str(a) for a in (g.get("aliases") or []) if isinstance(a, str)] + \
+                    [str(a) for r in group_records for a in (r.get("aliases") or []) if isinstance(a, str)]
                 cve = next((a for a in aliases if re.fullmatch(r"CVE-\d{4}-\d{4,7}", a)), "")
+                # Some databases (PYSEC) have no one-line summary, only details;
+                # take a summary from any record in the group, else details' first sentence.
+                summary = next((str(r["summary"]) for r in group_records if r.get("summary")), "")
+                if not summary:
+                    details = next((str(r["details"]) for r in group_records if r.get("details")), "")
+                    summary = re.split(r"(?<=[.!?])\s|\n", details.strip(), 1)[0] if details else ""
+                fixed = []
+                for r in group_records:
+                    fixed += [f for f in _fixed_in(r, name) if f not in fixed]
                 vulns.append({"id": re.sub(r"[^A-Za-z0-9._:-]", "", ids[0])[:64], "cve": cve,
-                              "severity": _severity(g, record), "fixed": _fixed_in(record, name),
-                              "summary": _plain(str(record.get("summary", "")), 160)})
+                              "severity": _severity(g, record), "fixed": fixed[:3],
+                              "summary": _plain(summary, 160)})
             if not vulns or not name:
                 continue
             vulns.sort(key=lambda v: SEVERITY_ORDER[v["severity"]])
@@ -922,7 +937,7 @@ def osv_scan(root):
         if not repo.startswith("/"):
             continue
         out = capture(["/usr/bin/osv-scanner", "scan", "source", "-r", "--format", "json", repo],
-                      timeout=300, cap=64 << 20, ok=(0, 1, 128))
+                      timeout=300, cap=64 << 20, ok_codes=(0, 1, 128))
         try:
             doc = json.loads(out) if out.strip() else {"results": []}
         except ValueError:
