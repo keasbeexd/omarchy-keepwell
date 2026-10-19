@@ -33,6 +33,19 @@ Item {
   signal confirmAccepted()
   signal confirmCanceled()
   signal confirmSnapshotToggled()
+  signal confirmOptionToggled(string id)
+
+  // The Trash sheet, driven by the service.
+  property bool trashOpen: false
+  property string trashTitle: ""
+  property string trashContext: ""
+  property var trashItems: null
+  property bool trashFailed: false
+  property bool trashBusy: false
+  property var trashChecked: ({})
+  signal trashToggled(string id)
+  signal trashAccepted()
+  signal trashCanceled()
 
   readonly property bool shown: window.visible
 
@@ -139,6 +152,10 @@ Item {
         Keys.onPressed: function(event) {
           if (root.confirmOpen) {
             if (confirmSheet.handleKey(event)) event.accepted = true
+            return
+          }
+          if (root.trashOpen) {
+            if (trashSheet.handleKey(event)) event.accepted = true
             return
           }
           var actions = root.check.actions || []
@@ -359,6 +376,23 @@ Item {
           onConfirmed: root.confirmAccepted()
           onCanceled: root.confirmCanceled()
           onSnapshotToggled: root.confirmSnapshotToggled()
+          onOptionToggled: function(id) { root.confirmOptionToggled(id) }
+        }
+
+        TrashSheet {
+          id: trashSheet
+          anchors.fill: parent
+          z: 10
+          opened: root.trashOpen
+          title: root.trashTitle
+          context: root.trashContext
+          items: root.trashItems
+          failed: root.trashFailed
+          busy: root.trashBusy
+          checked: root.trashChecked
+          onToggled: function(id) { root.trashToggled(id) }
+          onConfirmed: root.trashAccepted()
+          onCanceled: root.trashCanceled()
         }
       }
     }
