@@ -8,9 +8,10 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.2.0 — read-only.** Every check reads your real system, but
-> Keepwell does not change anything yet: install, terminal and cleanup
-> actions are shown and arrive in the next build (pressing one says so).
+> **Status: 0.3.0.** Every check reads your real system. Installs, firewall,
+> updates and snapshots work through a visible terminal (below). Cleanup and
+> the privacy settings are shown and arrive in the next builds (pressing one
+> says so).
 
 ## What it looks like
 
@@ -110,7 +111,47 @@ the window. Nothing else in Keepwell makes a network request.
 
 ### What it writes
 
-Nothing. Keepwell creates no files.
+Nothing by itself: Keepwell creates no files. Changes to your system happen
+only through the actions below, in a terminal, after you confirm.
+
+## Actions
+
+Anything that installs software or changes the system goes through one
+script, `bin/keepwell-run`, in three steps:
+
+1. **Confirm.** Keepwell shows what the action does and the exact commands,
+   taken from `keepwell-run plan <action>` — the same table the terminal
+   uses, so the dialog cannot show one thing and the terminal run another.
+   Actions that install software offer a snapshot first.
+2. **Terminal.** Keepwell steps aside and opens a floating terminal
+   (`uwsm-app -- xdg-terminal-exec`, app-id `org.omarchy.terminal`) running
+   `keepwell-run apply <action>`. It prints the commands again and waits for
+   Enter; close the window to cancel. Each step runs from an absolute path
+   after checking the program is a root-owned system file; the first failure
+   stops the rest. Steps that need root use `sudo`, or an Omarchy command
+   that calls it, so you type your password in the terminal — never in
+   Keepwell. Nothing from the plugin's own directory runs as root.
+3. **Back.** When that terminal window closes, Keepwell comes back on the
+   same check, checks again and says what it found.
+
+| Action | Commands |
+|---|---|
+| Install arch-audit, gitleaks, GufW, Flatseal, Disk Usage Analyzer | `omarchy pkg add <package>` |
+| Install ClamAV | `omarchy pkg add clamav`, `sudo freshclam`, `sudo systemctl enable --now clamav-freshclam.service` |
+| Turn on definition updates | `sudo systemctl enable --now clamav-freshclam.service` |
+| Scan Downloads | `clamscan --recursive --infected -- ~/Downloads` (reports only) |
+| Install UFW / Turn on the firewall | `omarchy pkg add ufw` (install only), `sudo ufw default deny incoming`, `sudo ufw default allow outgoing`, `sudo ufw enable` |
+| Deny incoming | `sudo ufw default deny incoming` |
+| Turn off the firewall | `sudo ufw disable` |
+| Update the system | `omarchy update` |
+| Take a snapshot | `omarchy snapshot create` |
+
+Opening an app (GufW, Flatseal, Disk Usage Analyzer, VS Code) runs
+`uwsm-app -- <app>.desktop` and closes Keepwell.
+
+ClamAV's definition updates download from ClamAV's servers, and package
+installs download from your Arch mirrors; both happen only in the terminal,
+after you confirm.
 
 ## Removing
 

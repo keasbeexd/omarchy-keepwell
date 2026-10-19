@@ -7,3 +7,5 @@ CheckRow 1.0 CheckRow.qml
 SectionBanner 1.0 SectionBanner.qml
 DetailPane 1.0 DetailPane.qml
 ScrollHint 1.0 ScrollHint.qml
+CheckBox 1.0 CheckBox.qml
+ConfirmSheet 1.0 ConfirmSheet.qml

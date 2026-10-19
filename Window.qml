@@ -21,6 +21,18 @@ Item {
 
   // network: also ask the Arch security tracker (arch-audit).
   signal checkRequested(bool network)
+  // action: a check's action object; context: "Security · Firewall".
+  signal actionRequested(var action, string checkId, string context)
+
+  // The confirm sheet, driven by the service.
+  property bool confirmOpen: false
+  property var confirmPlan: null
+  property bool confirmFailed: false
+  property bool confirmSnapshot: false
+  property string confirmContext: ""
+  signal confirmAccepted()
+  signal confirmCanceled()
+  signal confirmSnapshotToggled()
 
   readonly property bool shown: window.visible
 
@@ -74,13 +86,7 @@ Item {
   function activateAction(i) {
     var actions = check.actions || []
     if (i < 0 || i >= actions.length || actions[i].disabled) return
-    if (actions[i].run === "network") {
-      checkRequested(true)
-      return
-    }
-    // Installs, terminals and trash arrive in the next build; until then say
-    // so rather than pretend something happened.
-    notice = "“" + actions[i].label + "” arrives in the next build."
+    actionRequested(actions[i], check.id || "", (section.name || "") + " · " + (check.title || ""))
   }
 
   function primaryIndex() {
@@ -131,6 +137,10 @@ Item {
         focus: true
 
         Keys.onPressed: function(event) {
+          if (root.confirmOpen) {
+            if (confirmSheet.handleKey(event)) event.accepted = true
+            return
+          }
           var actions = root.check.actions || []
           if (event.key === Qt.Key_Escape) {
             if (root.actionCursor >= 0) root.actionCursor = -1
@@ -335,6 +345,20 @@ Item {
               color: root.notice !== "" ? Tokens.fg2 : Tokens.fg3
             }
           }
+        }
+
+        ConfirmSheet {
+          id: confirmSheet
+          anchors.fill: parent
+          z: 10
+          opened: root.confirmOpen
+          plan: root.confirmPlan
+          failed: root.confirmFailed
+          snapshot: root.confirmSnapshot
+          context: root.confirmContext
+          onConfirmed: root.confirmAccepted()
+          onCanceled: root.confirmCanceled()
+          onSnapshotToggled: root.confirmSnapshotToggled()
         }
       }
     }

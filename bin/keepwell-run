@@ -1,0 +1,228 @@
+#!/usr/bin/python3 -I -S
+"""Keepwell's action runner.
+
+    keepwell-run plan  <action> [--snapshot]   print the plan as JSON
+    keepwell-run apply <action> [--snapshot]   show the plan in this terminal,
+                                               wait for Enter, then run it
+
+Both modes build the plan from the same table below, so the commands the
+confirm dialog shows are the commands that run. Actions are a fixed set and
+take no data from outside: nothing a file, a window title or another program
+says can reach an argument.
+
+Nothing here runs as root. Steps that need it call sudo (or an Omarchy
+command that calls sudo) on a root-owned system binary with literal
+arguments, in this visible terminal, so you see each command and type your
+password here — never in Keepwell.
+"""
+
+import json
+import os
+import shlex
+import signal
+import stat
+import subprocess
+import sys
+
+OMARCHY = "/usr/bin/omarchy"
+SUDO = "/usr/bin/sudo"
+HOME = os.path.expanduser("~")
+ENV = {
+    "PATH": "/usr/share/omarchy/bin:/usr/bin",
+    "HOME": HOME,
+    "LANG": os.environ.get("LANG", "C.UTF-8"),
+    "TERM": os.environ.get("TERM", "xterm-256color"),
+}
+for key in ("XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "OMARCHY_PATH", "USER", "LOGNAME"):
+    if key in os.environ:
+        ENV[key] = os.environ[key]
+
+
+def step(say, argv, root=False, password=False):
+    """One command. root: run through sudo. password: the command may ask
+    for your password itself (Omarchy commands that call sudo)."""
+    full = [SUDO, "--"] + argv if root else argv
+    return {"say": say, "argv": full, "root": root or password}
+
+
+def pkg_add(*names):
+    return step("Install " + ", ".join(names) + " from the Arch repositories",
+                [OMARCHY, "pkg", "add"] + list(names), password=True)
+
+
+# The action table. Each entry: title, what it does in plain words, and the
+# steps. `system` marks actions that change installed software, where a
+# snapshot first is offered.
+ACTIONS = {
+    "install-arch-audit": dict(
+        title="Install arch-audit",
+        summary="Adds the official tool that checks installed packages against Arch's security tracker.",
+        system=True, steps=lambda: [pkg_add("arch-audit")]),
+    "install-clamav": dict(
+        title="Install ClamAV",
+        summary="Adds the ClamAV virus scanner and keeps its virus definitions up to date. Definitions download from ClamAV's servers.",
+        system=True, steps=lambda: [
+            pkg_add("clamav"),
+            step("Download virus definitions now", ["/usr/bin/freshclam"], root=True),
+            step("Keep definitions up to date automatically",
+                 ["/usr/bin/systemctl", "enable", "--now", "clamav-freshclam.service"], root=True)]),
+    "freshclam-on": dict(
+        title="Turn on definition updates",
+        summary="Starts ClamAV's own updater, which checks ClamAV's servers for new virus definitions several times a day.",
+        system=False, steps=lambda: [
+            step("Keep definitions up to date automatically",
+                 ["/usr/bin/systemctl", "enable", "--now", "clamav-freshclam.service"], root=True)]),
+    "scan-downloads": dict(
+        title="Scan Downloads",
+        summary="Scans your Downloads folder with ClamAV and lists anything infected. Nothing is deleted or moved.",
+        system=False, steps=lambda: [
+            step("Scan ~/Downloads", ["/usr/bin/clamscan", "--recursive", "--infected", "--",
+                                     os.path.join(HOME, "Downloads")])]),
+    "install-gitleaks": dict(
+        title="Install gitleaks",
+        summary="Adds gitleaks, which finds passwords and keys committed to git repositories.",
+        system=True, steps=lambda: [pkg_add("gitleaks")]),
+    "install-gufw": dict(
+        title="Install GufW",
+        summary="Adds GufW, a window for viewing and editing your firewall rules.",
+        system=True, steps=lambda: [pkg_add("gufw")]),
+    "install-ufw": dict(
+        title="Install and turn on the firewall",
+        summary="Adds UFW, then blocks incoming connections and allows outgoing ones.",
+        system=True, steps=lambda: [pkg_add("ufw")] + _ufw_on()),
+    "ufw-on": dict(
+        title="Turn on the firewall",
+        summary="Blocks incoming connections and allows outgoing ones, then switches the firewall on, now and at every start.",
+        system=False, steps=lambda: _ufw_on()),
+    "ufw-deny-incoming": dict(
+        title="Deny incoming connections",
+        summary="Sets the firewall to block connections that start from outside. Rules you added are kept.",
+        system=False, steps=lambda: [
+            step("Block incoming by default", ["/usr/bin/ufw", "default", "deny", "incoming"], root=True)]),
+    "ufw-off": dict(
+        title="Turn off the firewall",
+        summary="Stops filtering connections. Your rules are kept and come back when you turn it on again.",
+        system=False, steps=lambda: [
+            step("Switch the firewall off", ["/usr/bin/ufw", "disable"], root=True)]),
+    "install-flatseal": dict(
+        title="Install Flatseal",
+        summary="Adds Flatseal, which shows and changes what each Flatpak app may access.",
+        system=True, steps=lambda: [pkg_add("flatseal")]),
+    "install-baobab": dict(
+        title="Install Disk Usage Analyzer",
+        summary="Adds GNOME's Disk Usage Analyzer, which shows which folders take the most space.",
+        system=True, steps=lambda: [pkg_add("baobab")]),
+    "update": dict(
+        title="Update the system",
+        summary="Runs Omarchy's own update: it takes a snapshot, then updates Omarchy and every package.",
+        system=False, steps=lambda: [step("Update Omarchy and all packages", [OMARCHY, "update"], password=True)]),
+    "snapshot": dict(
+        title="Take a snapshot",
+        summary="Creates a restore point of the system (not your home folder), which you can boot into from the boot menu.",
+        system=False, steps=lambda: [_snapshot()]),
+}
+
+
+def _ufw_on():
+    return [
+        step("Block incoming by default", ["/usr/bin/ufw", "default", "deny", "incoming"], root=True),
+        step("Allow outgoing by default", ["/usr/bin/ufw", "default", "allow", "outgoing"], root=True),
+        step("Switch the firewall on", ["/usr/bin/ufw", "enable"], root=True),
+    ]
+
+
+def _snapshot():
+    return step("Create a system snapshot", [OMARCHY, "snapshot", "create"], password=True)
+
+
+def plan(action_id, snapshot):
+    a = ACTIONS[action_id]
+    steps = a["steps"]()
+    if snapshot and a["system"]:
+        steps = [_snapshot()] + steps
+    return {
+        "id": action_id, "title": a["title"], "summary": a["summary"],
+        "snapshotOffered": a["system"],
+        "steps": [{"say": s["say"], "cmd": shlex.join(s["argv"]), "root": s["root"]} for s in steps],
+        "_argv": [s["argv"] for s in steps],
+    }
+
+
+# ---------------------------------------------------------------- terminal
+
+BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+
+
+def _trusted(program):
+    """A program we run must be a root-owned file that others can't write.
+    Checked just before its step, since an earlier step may install it."""
+    try:
+        st = os.stat(program)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o022
+
+
+def wait_enter(prompt):
+    try:
+        input(prompt)
+        return True
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
+def apply(action_id, snapshot):
+    p = plan(action_id, snapshot)
+    print(f"\n{BOLD}Keepwell · {p['title']}{RESET}\n")
+    print(p["summary"] + "\n")
+    print("These commands will run, in order:\n")
+    for n, s in enumerate(p["steps"], 1):
+        print(f"  {n}. {s['say']}")
+        print(f"     {DIM}${RESET} {s['cmd']}")
+    if any(s["root"] for s in p["steps"]):
+        print(f"\n{DIM}Steps marked with sudo or that install packages will ask for your password here.{RESET}")
+    if not wait_enter(f"\n{BOLD}Press Enter to run them{RESET}, or close this window to cancel. "):
+        return 130
+    for n, (s, argv) in enumerate(zip(p["steps"], p["_argv"]), 1):
+        print(f"\n{BOLD}[{n}/{len(p['steps'])}] {s['say']}{RESET}")
+        if not _trusted(argv[0]):
+            print(f"Stopped: {argv[0]} is missing or not a root-owned system program. Nothing from here on was run.")
+            wait_enter("\nPress Enter to close and return to Keepwell. ")
+            return 2
+        try:
+            rc = subprocess.call(argv, env=ENV)
+        except KeyboardInterrupt:
+            rc = 130
+        except OSError as e:
+            print(f"Couldn't start {argv[0]}: {e.strerror}")
+            rc = 127
+        if rc != 0:
+            print(f"\n{BOLD}Step {n} did not finish (exit {rc}).{RESET} Nothing after it was run.")
+            wait_enter("\nPress Enter to close and return to Keepwell. ")
+            return rc
+    print(f"\n{BOLD}Done.{RESET}")
+    wait_enter("\nPress Enter to close and return to Keepwell. ")
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) < 2 or args[0] not in ("plan", "apply") or args[1] not in ACTIONS:
+        sys.stderr.write("usage: keepwell-run plan|apply <action> [--snapshot]\n")
+        return 2
+    extra = args[2:]
+    if extra not in ([], ["--snapshot"]):
+        return 2
+    snapshot = extra == ["--snapshot"]
+    if args[0] == "plan":
+        p = plan(args[1], snapshot)
+        del p["_argv"]
+        sys.stdout.write(json.dumps(p, separators=(",", ":")))
+        return 0
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    return apply(args[1], snapshot)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
