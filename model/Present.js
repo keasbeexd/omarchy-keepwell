@@ -71,6 +71,8 @@ var CATALOG = {
     what: "ClamAV checks files against a list of known malware. On Linux it mostly catches Windows malware in downloads and in files you pass on to others." },
   upd: { id: "upd", title: "System updates", tool: "omarchy update",
     what: "Updates bring security fixes for everything installed. Keepwell only reminds you; it never updates on its own." },
+  outside: { id: "outside", title: "Software outside updates", tool: "pacman · AUR · Flatpak",
+    what: "omarchy update keeps official packages, AUR packages and mise tools up to date. Software that came another way — a program you downloaded, a package you built yourself, a Flatpak — gets no security fixes unless you update it yourself." },
   fw: { id: "fw", title: "Firewall", tool: "UFW",
     what: "The firewall decides which network connections may reach this computer. Blocking incoming and allowing outgoing is the right default for a desktop or laptop." },
   deps: { id: "deps", title: "Dependency vulnerabilities", tool: "osv-scanner",
@@ -106,7 +108,7 @@ var CATALOG = {
 }
 
 var LAYOUT = [
-  { id: "security", name: "Security", checks: ["audit", "av", "upd", "fw", "remote", "leaks", "deps"] },
+  { id: "security", name: "Security", checks: ["audit", "av", "upd", "outside", "fw", "remote", "leaks", "deps"] },
   { id: "privacy", name: "Privacy", checks: ["browser", "netpriv", "apps", "cam", "traces", "perms"] },
   { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk", "failed"] }
 ]
@@ -264,6 +266,39 @@ function firewall(p) {
   return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "good", status: "On — blocks incoming, allows outgoing",
     meta: plural(p.rules, "rule", "rules") + (p.gufw ? " · edit in GufW" : ""), facts: facts,
     actions: [gui, { label: "Turn off…", elevated: true, act: "ufw-off" }] })
+}
+
+function outside(p, perms, now) {
+  var b = CATALOG.outside
+  var list = function(v) { return Array.isArray(v) ? v : [] }
+  var hand = list(p.hand), notInAur = list(p.notInAur)
+  var tools = [["cargo install", list(p.cargo)], ["go install", list(p.go)], ["pipx", list(p.pipx)], ["uv tool", list(p.uv)]]
+    .filter(function(t) { return t[1].length })
+  var flatpaks = perms && perms.apps > 0 ? perms.apps : 0
+  var facts = []
+  hand.forEach(function(h) {
+    facts.push(fact(h.name, h.shadows ? "Hides the packaged " + h.name + " in /usr/bin — you may be running an old copy"
+      : h.appimage ? "AppImage — update it from where you downloaded it" : "Program copied in by hand — nothing updates it", h.where))
+  })
+  notInAur.forEach(function(n) { facts.push(fact(n, "Not in the AUR any more — yay can't update it", "built yourself")) })
+  tools.forEach(function(t) { facts.push(fact(t[0], t[1].join(", "), "update with " + t[0].split(" ")[0])) })
+  if (flatpaks) facts.push(fact("Flatpak", plural(flatpaks, "app", "apps"), "update with flatpak update"))
+  var aur = p.foreign > 0 ? (p.aurAt ? "AUR checked " + ago(p.aurAt, now) + (p.refreshFailed ? " (couldn't reach it this time)" : "")
+    : "AUR not checked yet — Refresh asks it") : ""
+  var count = facts.length
+  var covered = (p.foreign || 0) - notInAur.length
+  if (covered > 0) facts.push(fact("AUR packages", covered + " still in the AUR — yay updates " + (covered === 1 ? "it" : "them"), aur))
+  var actions = flatpaks ? [{ label: "Update Flatpak apps…", primary: true, act: "flatpak-update" }] : []
+  var shadows = hand.filter(function(h) { return h.shadows })
+  if (!count) return check(b, { kind: "good", status: "omarchy update covers everything",
+    meta: p.foreign ? plural(p.foreign, "AUR package", "AUR packages") + ", all still in the AUR" : "Packages and mise tools only",
+    facts: facts })
+  return check(b, { kind: shadows.length ? "attn" : "info",
+    status: shadows.length ? shadows[0].name + " in " + shadows[0].where + " hides the packaged one"
+      : count === 1 ? "One thing omarchy update misses" : word(count) + " things omarchy update misses",
+    meta: facts.slice(0, Math.min(count, 3)).map(function(f) { return f.k }).join(" · "),
+    facts: facts, actions: actions,
+    note: "These don't get security fixes from omarchy update. Update each the way it was installed — or remove what you no longer use." })
 }
 
 function remote(p) {
@@ -725,6 +760,7 @@ function build(doc, now) {
     audit: function() { return audit(p("audit"), net, now) },
     av: function() { return antivirus(p("antivirus"), now) },
     upd: function() { return updates(p("updates"), now) },
+    outside: function() { return outside(p("outside"), p("permissions"), now) },
     fw: function() { return firewall(p("firewall")) },
     remote: function() { return remote(p("remote")) },
     leaks: function() { return leaks(p("tools"), now) },
@@ -746,7 +782,7 @@ function build(doc, now) {
     var s = LAYOUT[i]
     var checks = s.checks.map(function(id) {
       if (!probes) return loading(id)
-      var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", remote: "remote", leaks: "tools",
+      var probeName = { audit: "audit", av: "antivirus", upd: "updates", outside: "outside", fw: "firewall", remote: "remote", leaks: "tools",
         deps: "tools", browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
         clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk", failed: "failed" }[id]
       var probe = probeName ? probes[probeName] : null

@@ -11,7 +11,9 @@ facts, so its output stays small and strictly shaped.
 Usage: keepwell-check [--network | --auto]
 
   --network   also run arch-audit, which downloads the Arch security tracker
-              data (about 900 KB) from https://security.archlinux.org.
+              data (about 900 KB) from https://security.archlinux.org, and
+              ask the AUR (https://aur.archlinux.org) which of the packages
+              installed from outside the official repositories it still has.
   --auto      the same, as the hourly always-on check: skipped on a connection
               NetworkManager marks as metered.
 Without either, nothing here touches the network.
@@ -847,6 +849,131 @@ def probe_tools():
 
 # ---------------------------------------------------------------- main
 
+# ---------------------------------------------------------------- outside updates
+
+# omarchy update covers pacman's repositories, the AUR (yay -Sua) and mise.
+# These are the usual ways software arrives without any of them.
+APPIMAGE_DIRS = ("Applications", "AppImages", "bin", ".local/bin", "Downloads")
+TOOL_DIRS = {"pipx": (".local/share/pipx/venvs", ".local/pipx/venvs"), "uv": (".local/share/uv/tools",)}
+PKG_NAME = re.compile(r"[a-z0-9@._+-]{1,128}")
+AUR_RPC = "https://aur.archlinux.org/rpc/v5/info"
+
+
+def _is_elf(path):
+    """True when `path` (followed, it may be a link we listed) is a regular
+    file starting with the ELF magic. Reads four bytes from one descriptor."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(fd).st_mode) and os.read(fd, 4) == b"\x7fELF"
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def _names(path, limit=200):
+    try:
+        with os.scandir(path) as it:
+            return sorted(e.name for n, e in enumerate(it) if n < limit)
+    except OSError:
+        return []
+
+
+def _hand_installed():
+    """Compiled programs and AppImages put on PATH (or in the usual app
+    folders) by hand: not a package, not mise, cargo or go."""
+    managed = tuple(os.path.join(HOME, d) + "/" for d in (".local/share/mise", ".cargo", "go"))
+    found, outside_home = {}, []
+    dirs = [os.path.join(HOME, ".local/bin"), "/usr/local/bin"] + [os.path.join(HOME, d) for d in APPIMAGE_DIRS]
+    for d in dict.fromkeys(dirs):
+        on_path = d in (os.path.join(HOME, ".local/bin"), "/usr/local/bin", os.path.join(HOME, "bin"))
+        for name in _names(d):
+            path = os.path.join(d, name)
+            appimage = name.lower().endswith(".appimage")
+            if not (on_path or appimage) or path in found:
+                continue
+            real = os.path.realpath(path)
+            if real.startswith(managed) or not _is_elf(path):
+                continue
+            found[path] = {"name": clean(name, 64), "where": clean(d.replace(HOME, "~", 1), 64),
+                           "appimage": appimage,
+                           "shadows": on_path and not appimage and exists(os.path.join("/usr/bin", name))}
+            if not real.startswith(HOME + "/"):
+                outside_home.append(real)
+    if outside_home:
+        _, out = text(["/usr/bin/pacman", "-Qo", "--"] + outside_home[:100], timeout=8, cap=64 * 1024)
+        owned = {m.group(1) for m in re.finditer(r"(?m)^(/\S+) is owned by ", out)}
+        found = {k: v for k, v in found.items() if os.path.realpath(k) not in owned}
+    return list(found.values())[:30]
+
+
+def _cargo_crates():
+    data = read_file(os.path.join(HOME, ".cargo/.crates.toml"), 256 * 1024, user_owned=True)
+    if not data:
+        return []
+    names = re.findall(r'(?m)^"([A-Za-z0-9_-]{1,64}) [^"]*" = ', data.decode("utf-8", "replace"))
+    return sorted(set(names))[:30]
+
+
+def _aur_lookup(foreign):
+    """Which of `foreign` the AUR has, or None when it couldn't be asked.
+    One HTTPS request, no redirects, capped; only package names are sent."""
+    query = "&".join("arg[]=" + n for n in foreign)
+    rc, out = run(["/usr/bin/curl", "-q", "--silent", "--globoff", "--proto", "=https", "--max-redirs", "0",
+                   "--max-time", "10", "--max-filesize", "1048576", "--fail", "--", AUR_RPC + "?" + query],
+                  timeout=12, cap=1024 * 1024)
+    if rc != 0:
+        return None
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or doc.get("type") != "multiinfo" or not isinstance(doc.get("results"), list):
+        return None
+    return {r.get("Name") for r in doc["results"][:200] if isinstance(r, dict) and isinstance(r.get("Name"), str)}
+
+
+def probe_outside(network):
+    rc, out = text(["/usr/bin/pacman", "-Qmq"], timeout=5, cap=64 * 1024)
+    foreign = [n for n in out.split() if PKG_NAME.fullmatch(n)] if rc in (0, 1) else []
+    # makepkg's split -debug packages are never in the AUR on their own.
+    foreign = [n for n in foreign if not (n.endswith("-debug") and n[:-6] in foreign)][:100]
+    try:
+        cached = keepwell_state.read_json("aur.json") or {}
+    except (OSError, ValueError):
+        cached = {}
+    checked = set(cached.get("checked") or []) if isinstance(cached.get("checked"), list) else set()
+    missing = set(cached.get("missing") or []) if isinstance(cached.get("missing"), list) else set()
+    at = cached.get("at") if isinstance(cached.get("at"), int) else None
+    p = {"foreign": len(foreign)}
+    # The hourly run asks at most every six hours; Refresh always asks.
+    if network == "auto" and (_metered() or (at and time.time() - at < 6 * 3600)):
+        network = False
+    if network and foreign:
+        have = _aur_lookup(foreign)
+        if have is None:
+            p["refreshFailed"] = True
+        else:
+            checked, missing, at = set(foreign), {n for n in foreign if n not in have}, int(time.time())
+            try:
+                keepwell_state.write("aur.json", json.dumps({"at": at, "checked": sorted(checked),
+                                                             "missing": sorted(missing)}, separators=(",", ":")).encode())
+            except (OSError, ValueError):
+                pass
+    p["notInAur"] = [clean(n, 64) for n in foreign if n in missing][:30]
+    p["unchecked"] = len([n for n in foreign if n not in checked])
+    p["aurAt"] = at
+    p["hand"] = _hand_installed()
+    p["cargo"] = _cargo_crates()
+    p["go"] = [clean(n, 64) for n in _names(os.path.join(HOME, "go/bin"), 30)]
+    for tool, dirs in TOOL_DIRS.items():
+        p[tool] = [clean(n, 64) for d in dirs for n in _names(os.path.join(HOME, d), 30)][:30]
+    return p
+
+
 def main():
     network = "auto" if "--auto" in sys.argv[1:] else "--network" in sys.argv[1:]
     procs = own_processes()
@@ -869,7 +996,8 @@ def main():
                      ("unclaimed", probe_unclaimed),
                      ("schedule", probe_schedule),
                      ("remote", probe_remote),
-                     ("failed", probe_failed)):
+                     ("failed", probe_failed),
+                     ("outside", lambda: probe_outside(network))):
         if remaining() <= 0.5:
             probes[name] = {"skipped": True}
             continue
