@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
+import Quickshell.Hyprland
 import "core"
 import "model/Present.js" as Present
 import "model/Status.js" as Status
@@ -126,7 +126,13 @@ Scope {
     onTriggered: root.now = Date.now() / 1000
   }
 
-  Component.onCompleted: check(false)
+  // The check the window should show when it next opens (after a terminal).
+  property string focusCheckId: ""
+
+  Component.onCompleted: {
+    check(false)
+    pendingReader.start(python.concat([sourceDir + "/bin/keepwell-run", "pending", "get"]))
+  }
 
   // ---------------- actions ----------------
   // The confirm sheet's state, bound into the window.
@@ -147,6 +153,28 @@ Scope {
     if (action.run === "network") { say(""); check(true); return }
     if (action.launch) { launch(action.launch); return }
     if (action.act) { openConfirm(action.act, checkId, context); return }
+    if (action.scan === "downloads" || action.scan === "home") {
+      startJob(["scan", action.scan], "Scanning " + (action.scan === "home" ? "your home folder" : "Downloads")
+               + " in the background — you'll get a notification when it's done.")
+      return
+    }
+    if (action.stop === "clamscan" || action.stop === "gitleaks") { startJob(["stop", action.stop], "Scan stopped."); return }
+    if (action.rescan === "leaks" && typeof action.folder === "string") {
+      startJob(["leaks", action.folder], "Scanning for secrets in the background — you'll get a notification when it's done.")
+      return
+    }
+    if (action.pick === "leaks") {
+      if (picker.running) return
+      picking = true
+      hide()
+      picker.start(python.concat([sourceDir + "/bin/keepwell-run", "pick-folder"]))
+      return
+    }
+    if (action.url === "https://security.archlinux.org/") {
+      Quickshell.execDetached(["/usr/bin/uwsm-app", "--", "/usr/bin/xdg-open", action.url])
+      hide()
+      return
+    }
     if (action.trashSet) { openTrash(action.trashSet, action.label, context); return }
     say("“" + action.label + "” arrives in the next build.")
   }
@@ -181,6 +209,13 @@ Scope {
     if (confirmSnapshot) flags.push("--snapshot")
     if (confirmChosen !== null) flags.push("--with", confirmChosen.join(","))
     return flags
+  }
+
+  function toggleAllOptions() {
+    if (!confirmPlan || confirmChosen === null) return
+    var all = confirmPlan.options.map(function(o) { return o.id })
+    confirmChosen = confirmChosen.length === all.length ? [] : all
+    fetchPlan()
   }
 
   function toggleOption(id) {
@@ -270,6 +305,14 @@ Scope {
     trashChecked = next
   }
 
+  function toggleAllTrash() {
+    var items = trashItems || []
+    var all = items.length > 0 && items.every(function(i) { return root.trashChecked[i.id] === true })
+    var next = {}
+    if (!all) items.forEach(function(i) { next[i.id] = true })
+    trashChecked = next
+  }
+
   function confirmTrash() {
     var ids = (trashItems || []).filter(function(i) { return root.trashChecked[i.id] === true })
                                 .map(function(i) { return i.id })
@@ -318,8 +361,15 @@ Scope {
   }
 
   // ---------------- the terminal round trip ----------------
-  // { title, act, checkId, toplevel, network }
+  // { title, act, checkId, address, network }
+  //
+  // The terminal is found by its title once, then followed by its Hyprland
+  // window address, which nothing inside it can change. That address and
+  // the check it belongs to are written to Keepwell's state, so a shell
+  // that restarts meanwhile (omarchy update does) picks the round trip up
+  // again and still comes back to the right place.
   property var terminal: null
+  readonly property var networkActs: ["install-arch-audit", "update"]
 
   function acceptConfirm() {
     if (!confirmPlan || !pendingAct || terminal || confirmPlan.steps.length === 0) return
@@ -327,38 +377,66 @@ Scope {
     var argv = ["/usr/bin/uwsm-app", "--", "/usr/bin/xdg-terminal-exec",
                 "--app-id=org.omarchy.terminal", "--title=" + title, "-e"]
       .concat(python, [sourceDir + "/bin/keepwell-run", "apply", pendingAct.act], runFlags())
-    terminal = { title: title, act: pendingAct.act, checkId: pendingAct.checkId, toplevel: null,
-                 network: pendingAct.act === "install-arch-audit" || pendingAct.act === "update" }
+    terminal = { title: title, act: pendingAct.act, checkId: pendingAct.checkId, address: "",
+                 network: networkActs.indexOf(pendingAct.act) !== -1 }
+    resumed = false
+    savePending("-")
     confirmOpen = false
     pendingAct = null
     say("")
     hide()
     Quickshell.execDetached(argv)
+    neverOpened.interval = 20000
     neverOpened.restart()
   }
 
-  // The window is matched by its title once, then followed as an object, so
-  // a program that renames its terminal can't make it look closed.
+  // Writes to the pending note run one at a time, in order; the last one
+  // asked for always lands (a busy writer would otherwise drop it).
+  property var pendingQueue: []
+  function writePending(args) {
+    pendingQueue = pendingQueue.concat([python.concat([sourceDir + "/bin/keepwell-run", "pending"], args)])
+    if (!pendingWriter.running) pendingWriter.start(pendingQueue.shift())
+  }
+
+  function savePending(address) {
+    if (!terminal) return
+    writePending(["set", address, terminal.checkId, terminal.act])
+  }
+
+  function addressOf(t) {
+    var a = String(t && t.address || "").toLowerCase()
+    if (a.indexOf("0x") !== 0) a = "0x" + a
+    return /^0x[0-9a-f]{1,16}$/.test(a) ? a : ""
+  }
+
   function trackTerminal() {
     if (!terminal) return
-    var list = ToplevelManager.toplevels.values
-    if (!terminal.toplevel) {
+    var list = Hyprland.toplevels.values
+    if (terminal.address === "") {
       for (var i = 0; i < list.length; i++) {
-        if (list[i] && list[i].title === terminal.title) {
-          terminal.toplevel = list[i]
+        var a = addressOf(list[i])
+        if (list[i] && list[i].title === terminal.title && a !== "") {
+          terminal.address = a
           neverOpened.stop()
+          savePending(a)
           return
         }
       }
       return
     }
-    if (list.indexOf(terminal.toplevel) === -1) finishTerminal(true)
+    for (var j = 0; j < list.length; j++) if (addressOf(list[j]) === terminal.address) return
+    // Just after a restart the list may not have arrived yet.
+    if (settling) return
+    finishTerminal(true)
   }
+  property bool settling: false
 
   function finishTerminal(opened) {
     var t = terminal
     terminal = null
     neverOpened.stop()
+    writePending(["clear"])
+    focusCheckId = t.checkId
     show(true)
     if (!opened) { say("The terminal didn't open, so nothing was run."); return }
     say("Back from the terminal — checking the result…")
@@ -366,8 +444,58 @@ Scope {
     check(t.network)
   }
 
+  // After a shell restart: was Keepwell waiting on a terminal?
+  function resumePending(text) {
+    var d = null
+    try { d = JSON.parse(text) } catch (e) { d = null }
+    if (!d || typeof d.checkId !== "string" || typeof d.act !== "string" || typeof d.title !== "string") return
+    resumed = true
+    settling = true
+    terminal = { title: d.title, act: d.act, checkId: d.checkId,
+                 address: /^0x[0-9a-f]{1,16}$/.test(d.address) ? d.address : "",
+                 network: networkActs.indexOf(d.act) !== -1 }
+    // A shell that has just started doesn't know the windows that were
+    // already open (or their titles) until it asks Hyprland; ask, and give
+    // the answer a few seconds before deciding the terminal is gone.
+    Hyprland.refreshToplevels()
+    neverOpened.interval = 8000
+    neverOpened.restart()
+    resumeTimer.start()
+  }
+
+  BoundedProcess {
+    id: pendingWriter
+    maxBytes: 4096
+    timeoutMs: 5000
+    onFinished: if (root.pendingQueue.length > 0) {
+      var next = root.pendingQueue.slice()
+      var argv = next.shift()
+      root.pendingQueue = next
+      start(argv)
+    }
+  }
+  BoundedProcess {
+    id: pendingReader
+    maxBytes: 4096
+    timeoutMs: 5000
+    onFinished: function(ok, text) { if (ok) root.resumePending(text) }
+  }
+  Timer {
+    id: resumeTimer
+    interval: 1500
+    repeat: true
+    property int tries: 0
+    onTriggered: {
+      tries++
+      if (root.terminal && root.terminal.address === "" && tries < 5) Hyprland.refreshToplevels()
+      root.trackTerminal()
+      if (tries >= 2) root.settling = false
+      if (!root.terminal || tries >= 5) { stop(); tries = 0; root.settling = false; root.trackTerminal() }
+    }
+  }
+
   Connections {
-    target: ToplevelManager.toplevels
+    target: Hyprland.toplevels
     function onValuesChanged() { root.trackTerminal() }
   }
   // Belt and braces for a missed change signal.
@@ -380,7 +508,64 @@ Scope {
   Timer {
     id: neverOpened
     interval: 20000
-    onTriggered: if (root.terminal && !root.terminal.toplevel) root.finishTerminal(false)
+    // A resumed round trip whose terminal closed while the shell was down
+    // ends here as finished; a fresh one that never opened says so.
+    onTriggered: if (root.terminal && root.terminal.address === "") root.finishTerminal(root.resumed)
+  }
+  property bool resumed: false
+
+  // ---------------- background jobs ----------------
+  // Scans run as user services (see keepwell-run); these start and stop
+  // them, and the folder picker steps aside like a terminal does.
+  property bool picking: false
+
+  function startJob(args, started) {
+    if (jobber.running) return
+    jobMessage = started
+    jobber.start(python.concat([sourceDir + "/bin/keepwell-run"], args))
+  }
+  property string jobMessage: ""
+
+  BoundedProcess {
+    id: jobber
+    maxBytes: 4096
+    timeoutMs: 30000
+    onFinished: function(ok, text) {
+      var d = null
+      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
+      if (d && d.started === false)
+        root.say(d.reason === "running" ? "A scan is already running." : d.reason === "folder"
+                 ? "That folder can't be scanned." : "Couldn't start the scan.")
+      else if (!d) root.say("Something went wrong starting that.")
+      else root.say(root.jobMessage)
+      root.check(false)
+    }
+  }
+
+  BoundedProcess {
+    id: picker
+    maxBytes: 8192
+    timeoutMs: 600000
+    onFinished: function(ok, text) {
+      root.picking = false
+      var d = null
+      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
+      root.show(true)
+      if (d && typeof d.folder === "string" && d.folder.indexOf("/") === 0 && d.folder.length < 4096)
+        root.startJob(["leaks", d.folder], "Scanning for secrets in the background — you'll get a notification when it's done.")
+      else root.say("No folder chosen.")
+    }
+  }
+
+  // While a scan runs and the window is open, its state is re-read every
+  // 15 seconds so the window shows it ending; nothing polls otherwise.
+  readonly property bool scanning: !!(doc && doc.probes && ((doc.probes.antivirus && doc.probes.antivirus.scanning)
+                                     || (doc.probes.tools && doc.probes.tools.leaksScanning)))
+  Timer {
+    interval: 15000
+    repeat: true
+    running: root.opened && root.scanning
+    onTriggered: if (!checker.running) root.check(false)
   }
 
   // ---------------- window lifecycle ----------------
@@ -392,7 +577,10 @@ Scope {
     now = Date.now() / 1000
     if (!skipStaleCheck && !checker.running && (!doc || now - doc.at > 60)) check(false)
     windowLoader.active = true
-    if (windowLoader.item) windowLoader.item.show()
+    if (windowLoader.item) {
+      if (focusCheckId !== "") { windowLoader.item.focusCheck(focusCheckId); focusCheckId = "" }
+      windowLoader.item.show()
+    }
   }
   function hide() { if (windowLoader.item) windowLoader.item.hide() }
   function open() { show() }
@@ -430,6 +618,8 @@ Scope {
       item.confirmCanceled.connect(root.cancelConfirm)
       item.confirmSnapshotToggled.connect(root.toggleSnapshot)
       item.confirmOptionToggled.connect(root.toggleOption)
+      item.confirmAllToggled.connect(root.toggleAllOptions)
+      item.trashAllToggled.connect(root.toggleAllTrash)
       item.trashOpen = Qt.binding(function() { return root.trashOpen })
       item.trashTitle = Qt.binding(function() { return root.trashTitle })
       item.trashContext = Qt.binding(function() { return root.trashContext })
@@ -440,6 +630,7 @@ Scope {
       item.trashToggled.connect(root.toggleTrashItem)
       item.trashAccepted.connect(root.confirmTrash)
       item.trashCanceled.connect(root.cancelTrash)
+      if (root.focusCheckId !== "") { item.focusCheck(root.focusCheckId); root.focusCheckId = "" }
       item.show()
     }
   }

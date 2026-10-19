@@ -31,6 +31,12 @@ import subprocess
 import sys
 import time
 
+# The shared state module sits next to this script; -I keeps the script's
+# folder off sys.path, so it is added explicitly (and only it).
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import keepwell_state  # noqa: E402
+
 START = time.monotonic()
 TOTAL_BUDGET = 25.0          # seconds for the whole run
 OUT_LIMIT = 64 * 1024        # bytes of JSON we are willing to print
@@ -268,9 +274,22 @@ SEVERITIES = ("Critical", "High", "Medium", "Low", "Unknown")
 
 def probe_audit(network):
     p = {"installed": exists("/usr/bin/arch-audit"), "ran": False}
-    if not p["installed"] or not network:
+    if not p["installed"]:
         return p
-    rc, out = text(["/usr/bin/arch-audit", "--color", "never", "--format", "%n\t%s\t%v"],
+    if not network:
+        # The last result you asked for, until you ask again.
+        try:
+            last = keepwell_state.read_json("audit.json")
+        except (OSError, ValueError):
+            last = None
+        if last and last.get("ran") is True and isinstance(last.get("counts"), dict) \
+                and isinstance(last.get("packages"), list) and isinstance(last.get("at"), int):
+            last["packages"] = last["packages"][:60]
+            return last
+        return p
+    # %s prints "High risk", "Medium risk"…; %t is the kind of problem; %v is
+    # the fixed version, empty while no fix has been released.
+    rc, out = text(["/usr/bin/arch-audit", "--color", "never", "--format", "%n\t%s\t%t\t%v\t%c"],
                    timeout=30, cap=512 * 1024)
     if rc is None or rc not in (0, 1):
         p["error"] = True
@@ -279,15 +298,22 @@ def probe_audit(network):
     packages = []
     for line in out.splitlines():
         parts = line.split("\t")
-        if len(parts) != 3 or not re.fullmatch(r"[A-Za-z0-9@._+-]{1,128}", parts[0]):
+        if len(parts) != 5 or not re.fullmatch(r"[A-Za-z0-9@._+-]{1,128}", parts[0]):
             continue
-        sev = parts[1] if parts[1] in SEVERITIES else "Unknown"
+        word = parts[1].replace(" risk", "").strip()
+        sev = word if word in SEVERITIES else "Unknown"
         counts[sev] += 1
-        if len(packages) < 40:
-            fixed = parts[2].strip()
-            packages.append({"name": clean(parts[0], 64), "severity": sev,
-                             "fixed": clean(fixed, 64) if re.fullmatch(r"[A-Za-z0-9.:+~_-]{1,64}", fixed) else ""})
-    p.update(ran=True, counts=counts, packages=packages)
+        if len(packages) < 60:
+            fixed = parts[3].strip()
+            kinds = [k.strip() for k in parts[2].split(",") if re.fullmatch(r"[a-z ]{1,48}", k.strip())]
+            packages.append({"name": clean(parts[0], 64), "severity": sev, "kinds": kinds[:4],
+                             "fixed": fixed if re.fullmatch(r"[A-Za-z0-9.:+~_-]{1,64}", fixed) else "",
+                             "cves": len(re.findall(r"CVE-\d{4}-\d{4,7}", parts[4]))})
+    p.update(ran=True, counts=counts, packages=packages, at=int(time.time()))
+    try:
+        keepwell_state.write("audit.json", json.dumps(p, separators=(",", ":")).encode())
+    except (OSError, ValueError):
+        pass
     return p
 
 
@@ -317,20 +343,32 @@ def probe_antivirus():
                 p["scanAt"] = when
             elif line.rstrip().endswith("# clamtk-defs"):
                 p["defsAt"] = when
-    last = None
-    try:
-        with os.scandir(os.path.join(HOME, ".clamtk", "history")) as it:
-            for n, entry in enumerate(it):
-                if n > 2000:
-                    break
-                if entry.name.endswith(".log"):
-                    t = mtime(entry.path)
-                    if t and (last is None or t > last):
-                        last = t
-    except OSError:
-        pass
-    p["lastScanAt"] = last
+    p["scanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-clamscan.service"],
+                         timeout=3, cap=256)[1].strip() in ("active", "activating")
+    p["lastScan"] = _last_scan()
     return p
+
+
+def _last_scan():
+    """Summary of the newest Keepwell scan log: when, what, how many files,
+    and the infected files it named."""
+    try:
+        found = keepwell_state.latest_log()
+    except (OSError, ValueError):
+        return None
+    if not found or found[1] is None:
+        return None
+    name, raw = found
+    log = raw.decode("utf-8", "replace")
+    out = {"at": int(name[:10]), "target": "home" if name.endswith("-home.log") else "downloads",
+           "finished": "----------- SCAN SUMMARY -----------" in log}
+    for key, field in (("Scanned files", "files"), ("Infected files", "infected")):
+        m = re.search(r"(?m)^" + key + r": (\d+)$", log)
+        if m:
+            out[field] = int(m.group(1))
+    out["found"] = [clean(m.group(1).replace(HOME, "~", 1), 160)
+                    for m in re.finditer(r"(?m)^(.+): [^:\n]+ FOUND$", log)][:20]
+    return out
 
 
 def probe_updates():
@@ -496,6 +534,24 @@ def probe_snapshots():
          "omarchySnapshot": exists("/usr/bin/omarchy-snapshot") or exists("/usr/share/omarchy/bin/omarchy-snapshot")}
     if p["snapper"]:
         p["limineSync"], _ = unit_state("limine-snapper-sync.service")
+        conf = (read_file("/etc/snapper/configs/root", 64 * 1024) or b"").decode("utf-8", "replace")
+        m = re.search(r'(?m)^NUMBER_LIMIT="?(\d+)', conf)
+        p["keep"] = int(m.group(1)) if m else None
+        # The snapshot list itself is root-only; the boot-menu sync service
+        # logs each new snapshot ("[EVENT] CREATE,ISDIR -> 13"), and the
+        # journal is readable without root.
+        _, out = text(["/usr/bin/journalctl", "--no-pager", "-u", "limine-snapper-sync.service",
+                       "-g", "CREATE,ISDIR", "-n", "1", "-o", "json",
+                       "--output-fields=MESSAGE,__REALTIME_TIMESTAMP"], timeout=5, cap=16 * 1024)
+        try:
+            entry = json.loads(out.strip().splitlines()[-1]) if out.strip() else None
+        except ValueError:
+            entry = None
+        if isinstance(entry, dict):
+            m = re.search(r"CREATE,ISDIR -> (\d{1,7})$", str(entry.get("MESSAGE", "")))
+            ts = str(entry.get("__REALTIME_TIMESTAMP", ""))
+            if m and ts.isdigit():
+                p["last"] = {"number": int(m.group(1)), "at": int(ts) // 1000000}
     return p
 
 
@@ -652,7 +708,17 @@ def probe_chromium_policy():
 
 
 def probe_tools():
-    return {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
+    p = {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
+    if p["gitleaks"]:
+        p["leaksScanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-gitleaks.service"],
+                                  timeout=3, cap=256)[1].strip() in ("active", "activating")
+        try:
+            last = keepwell_state.read_json("gitleaks.json")
+        except (OSError, ValueError):
+            last = None
+        if last and isinstance(last.get("at"), int):
+            p["leaks"] = last
+    return p
 
 
 # ---------------------------------------------------------------- main

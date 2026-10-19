@@ -6,6 +6,13 @@
                                     terminal, wait for Enter, then run it
     keepwell-run list  <set>                  items that can go to Trash, as JSON
     keepwell-run trash <set> <id>...          move those items to Trash
+    keepwell-run scan  downloads|home         start a ClamAV scan in the background
+    keepwell-run leaks <folder>               start a gitleaks scan in the background
+    keepwell-run stop  clamscan|gitleaks      stop that background scan
+    keepwell-run pick-folder                  ask for a folder (zenity), print it as JSON
+    keepwell-run pending set <addr> <check> <action> | get | clear
+                                              the terminal Keepwell is waiting on, kept
+                                              across a shell restart (omarchy update)
 
 --with picks among an action's options (cleanup, for one); without it the
 options marked safe are used. Sets for Trash are "cache" (folders in
@@ -35,6 +42,10 @@ import stat
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import keepwell_state  # noqa: E402
+
 OMARCHY = "/usr/bin/omarchy"
 SUDO = "/usr/bin/sudo"
 HOME = os.path.expanduser("~")
@@ -49,11 +60,21 @@ for key in ("XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "O
         ENV[key] = os.environ[key]
 
 
-def capture(argv, timeout=10.0, cap=256 * 1024):
+# What a graphical program (the folder picker) needs to open a window and
+# look like the rest of the desktop; nothing else is passed on.
+DISPLAY_ENV = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DESKTOP",
+               "DBUS_SESSION_BUS_ADDRESS", "XCURSOR_SIZE", "XCURSOR_THEME", "GTK_THEME", "HOME", "LANG")
+
+
+def capture(argv, timeout=10.0, cap=256 * 1024, gui=False):
     """stdout of argv as text, or "" on failure, overrun or overflow."""
+    env = {"PATH": "/usr/bin", "LC_ALL": "C"}
+    if gui:
+        env.update({k: os.environ[k] for k in DISPLAY_ENV if k in os.environ})
+        env.pop("LC_ALL")
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, env={"PATH": "/usr/bin", "LC_ALL": "C"},
+                                stderr=subprocess.DEVNULL, env=env,
                                 cwd="/", start_new_session=True, close_fds=True)
     except OSError:
         return ""
@@ -157,12 +178,6 @@ ACTIONS = {
         system=False, steps=lambda o: [
             step("Keep definitions up to date automatically",
                  ["/usr/bin/systemctl", "enable", "--now", "clamav-freshclam.service"], root=True)]),
-    "scan-downloads": dict(
-        title="Scan Downloads",
-        summary="Scans your Downloads folder with ClamAV and lists anything infected. Nothing is deleted or moved.",
-        system=False, steps=lambda o: [
-            step("Scan ~/Downloads", ["/usr/bin/clamscan", "--recursive", "--infected", "--",
-                                     os.path.join(HOME, "Downloads")])]),
     "install-gitleaks": dict(
         title="Install gitleaks",
         summary="Adds gitleaks, which finds passwords and keys committed to git repositories.",
@@ -190,8 +205,8 @@ ACTIONS = {
         system=False, steps=lambda o: [
             step("Switch the firewall off", ["/usr/bin/ufw", "disable"], root=True)]),
     "install-flatseal": dict(
-        title="Install Flatseal",
-        summary="Adds Flatseal, which shows and changes what each Flatpak app may access.",
+        title="Install Flatpak and Flatseal",
+        summary="Adds Flatpak (a sandboxed way to install apps) and Flatseal, which shows and changes what each Flatpak app may reach.",
         system=True, steps=lambda o: [pkg_add("flatseal")]),
     "install-baobab": dict(
         title="Install Disk Usage Analyzer",
@@ -733,6 +748,153 @@ def apply(action_id, snapshot, chosen=None):
     return 0
 
 
+# ---------------------------------------------------------------- background scans
+# Long, read-only scans run as transient user services rather than in a
+# terminal: independent of the shell (they survive a restart), at idle CPU
+# and disk priority, one of each kind at a time, and they send one desktop
+# notification when they finish. Nothing they find is changed or deleted.
+
+UNITS = {"clamscan": "keepwell-clamscan.service", "gitleaks": "keepwell-gitleaks.service"}
+
+
+def _background(unit, title, argv):
+    if capture(["/usr/bin/systemctl", "--user", "is-active", unit], timeout=3, cap=256).strip() in ("active", "activating"):
+        return {"started": False, "reason": "running"}
+    notify = "ExecStopPost=/usr/bin/notify-send --app-name=Keepwell \"%s\" \"Open Keepwell to see the result.\"" % title
+    rc = subprocess.call(["/usr/bin/systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
+                          "--property=Nice=19", "--property=IOSchedulingClass=idle",
+                          "--property=" + notify, "--"] + argv,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env={"PATH": "/usr/bin", "HOME": HOME,
+                              "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", ""),
+                              "DBUS_SESSION_BUS_ADDRESS": os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")},
+                         timeout=15)
+    return {"started": rc == 0}
+
+
+def start_scan(target):
+    if not _trusted("/usr/bin/clamscan"):
+        return {"started": False, "reason": "missing"}
+    path = os.path.join(HOME, "Downloads") if target == "downloads" else HOME
+    log = keepwell_state.new_log(target)
+    argv = ["/usr/bin/clamscan", "--recursive", "--infected", "--log=" + log]
+    if target == "home":
+        # Caches, the Trash and Keepwell's own logs: rebuilt, already
+        # discarded, or written by the scan itself.
+        for sub in (".cache", ".local/share/Trash", ".local/state/keepwell"):
+            argv.append("--exclude-dir=^" + re.escape(os.path.join(HOME, sub)) + "(/|$)")
+    return _background(UNITS["clamscan"], "Virus scan ended", argv + ["--", path])
+
+
+def start_leaks(folder):
+    if not _trusted("/usr/bin/gitleaks"):
+        return {"started": False, "reason": "missing"}
+    if folder.startswith("~/"):
+        folder = os.path.join(HOME, folder[2:])
+    real = os.path.realpath(folder)
+    if not os.path.isabs(folder) or not os.path.isdir(real) or real == "/":
+        return {"started": False, "reason": "folder"}
+    me = os.path.realpath(__file__)
+    return _background(UNITS["gitleaks"], "Secrets scan ended",
+                       ["/usr/bin/python3", "-I", "-S", me, "leaks-scan", real])
+
+
+def stop(kind):
+    rc = subprocess.call(["/usr/bin/systemctl", "--user", "stop", "--", UNITS[kind]],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    return {"stopped": rc == 0}
+
+
+def find_repos(root, limit=100, seconds=20.0):
+    """Git repositories under root, at most four levels down, never through
+    a symlink, skipping folders that only ever hold dependencies."""
+    skip = {"node_modules", ".cache", "vendor", ".venv", "venv", "target", "build", "dist"}
+    found, deadline = [], time.monotonic() + seconds
+    stack = [(root, 0)]
+    while stack and len(found) < limit and time.monotonic() < deadline:
+        path, depth = stack.pop()
+        try:
+            with os.scandir(path) as it:
+                entries = list(it)[:2000]
+        except OSError:
+            continue
+        if any(e.name == ".git" for e in entries):
+            found.append(path)
+            continue
+        if depth >= 4:
+            continue
+        for e in entries:
+            if e.name in skip or e.name.startswith("."):
+                continue
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    stack.append((e.path, depth + 1))
+            except OSError:
+                continue
+    return sorted(found)
+
+
+def leaks_scan(root):
+    """Runs inside the background unit. Writes a summary with locations only:
+    gitleaks redacts the secrets, and Keepwell keeps none of its text."""
+    started = int(time.time())
+    repos = find_repos(root)
+    findings, scanned, failed = [], 0, 0
+    for repo in repos:
+        out = capture(["/usr/bin/gitleaks", "git", "--no-banner", "--redact", "--log-level", "error",
+                       "--report-format", "json", "--report-path", "-", "--exit-code", "0",
+                       "--timeout", "300", "--", repo], timeout=320, cap=16 << 20)
+        try:
+            items = json.loads(out) if out.strip() else []
+        except ValueError:
+            items = None
+        if not isinstance(items, list):
+            failed += 1
+            continue
+        scanned += 1
+        rel = os.path.relpath(repo, root)
+        for it in items[:200]:
+            if not isinstance(it, dict) or len(findings) >= 200:
+                continue
+            findings.append({
+                "repo": rel[:120] if rel != "." else os.path.basename(root)[:120],
+                "file": str(it.get("File", ""))[:160],
+                "line": it.get("StartLine") if isinstance(it.get("StartLine"), int) else 0,
+                "rule": re.sub(r"[^A-Za-z0-9_.-]", "", str(it.get("RuleID", "")))[:48],
+                "commit": re.sub(r"[^0-9a-f]", "", str(it.get("Commit", "")))[:8],
+            })
+    summary = {"at": started, "folder": root.replace(HOME, "~", 1)[:200], "repos": len(repos),
+               "scanned": scanned, "failed": failed, "findings": findings, "finished": True}
+    keepwell_state.write("gitleaks.json", json.dumps(summary, separators=(",", ":")).encode())
+    return 0
+
+
+def pending(args):
+    if args == ["get"]:
+        doc = keepwell_state.read_json("pending.json", cap=4096) or {}
+        # A note older than a day is about a terminal long gone.
+        if not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
+            doc = {}
+        return doc
+    if args == ["clear"]:
+        keepwell_state.remove("pending.json")
+        return {"cleared": True}
+    if len(args) == 4 and args[0] == "set" and re.fullmatch(r"0x[0-9a-f]{1,16}|-", args[1]) \
+            and re.fullmatch(r"[a-z]{1,16}", args[2]) and args[3] in ACTIONS:
+        doc = {"at": int(time.time()), "address": args[1], "checkId": args[2], "act": args[3],
+               "title": "Keepwell · " + ACTIONS[args[3]]["title"]}
+        keepwell_state.write("pending.json", json.dumps(doc).encode())
+        return {"saved": True}
+    return None
+
+
+def pick_folder():
+    out = capture(["/usr/bin/zenity", "--file-selection", "--directory",
+                   "--title=Choose a folder of git repositories", "--filename=" + HOME + "/"],
+                  timeout=600, cap=8192, gui=True).strip()
+    return {"folder": out if out.startswith("/") and "\n" not in out else ""}
+
+
 # ---------------------------------------------------------------- Trash
 
 CACHE = os.path.join(HOME, ".cache")
@@ -851,6 +1013,26 @@ def main():
             sys.stdout.write(json.dumps(trash(args[1], args[2:]), separators=(",", ":")))
             return 0
         return 2
+    if len(args) == 2 and args[0] == "scan" and args[1] in ("downloads", "home"):
+        sys.stdout.write(json.dumps(start_scan(args[1])))
+        return 0
+    if len(args) == 2 and args[0] == "stop" and args[1] in UNITS:
+        sys.stdout.write(json.dumps(stop(args[1])))
+        return 0
+    if len(args) == 2 and args[0] == "leaks":
+        sys.stdout.write(json.dumps(start_leaks(args[1])))
+        return 0
+    if len(args) == 2 and args[0] == "leaks-scan":
+        return leaks_scan(args[1])
+    if len(args) >= 2 and args[0] == "pending":
+        out = pending(args[1:])
+        if out is None:
+            return 2
+        sys.stdout.write(json.dumps(out))
+        return 0
+    if args == ["pick-folder"]:
+        sys.stdout.write(json.dumps(pick_folder()))
+        return 0
     if len(args) < 2 or args[0] not in ("plan", "apply") or args[1] not in ACTIONS:
         sys.stderr.write("usage: keepwell-run plan|apply <action> [--snapshot] [--with a,b] | list|trash <set> ...\n")
         return 2

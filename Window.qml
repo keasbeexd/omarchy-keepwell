@@ -34,6 +34,7 @@ Item {
   signal confirmCanceled()
   signal confirmSnapshotToggled()
   signal confirmOptionToggled(string id)
+  signal confirmAllToggled()
 
   // The Trash sheet, driven by the service.
   property bool trashOpen: false
@@ -44,6 +45,7 @@ Item {
   property bool trashBusy: false
   property var trashChecked: ({})
   signal trashToggled(string id)
+  signal trashAllToggled()
   signal trashAccepted()
   signal trashCanceled()
 
@@ -100,6 +102,22 @@ Item {
     var actions = check.actions || []
     if (i < 0 || i >= actions.length || actions[i].disabled) return
     actionRequested(actions[i], check.id || "", (section.name || "") + " · " + (check.title || ""))
+  }
+
+  // Show one check by id: its section, and it selected.
+  function focusCheck(id) {
+    for (var s = 0; s < sections.length; s++) {
+      var list = sections[s].checks || []
+      for (var c = 0; c < list.length; c++) {
+        if (list[c].id !== id) continue
+        sectionIndex = s
+        var next = selection.slice()
+        next[s] = c
+        selection = next
+        actionCursor = -1
+        return
+      }
+    }
   }
 
   function primaryIndex() {
@@ -377,6 +395,7 @@ Item {
           onCanceled: root.confirmCanceled()
           onSnapshotToggled: root.confirmSnapshotToggled()
           onOptionToggled: function(id) { root.confirmOptionToggled(id) }
+          onAllToggled: root.confirmAllToggled()
         }
 
         TrashSheet {
@@ -391,6 +410,7 @@ Item {
           busy: root.trashBusy
           checked: root.trashChecked
           onToggled: function(id) { root.trashToggled(id) }
+          onAllToggled: root.trashAllToggled()
           onConfirmed: root.trashAccepted()
           onCanceled: root.trashCanceled()
         }
