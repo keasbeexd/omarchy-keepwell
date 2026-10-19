@@ -77,6 +77,8 @@ var CATALOG = {
     what: "If you write software, osv-scanner checks the libraries your projects depend on — read from their lockfiles (package-lock.json, Cargo.lock, go.sum, requirements.txt and others) — against the OSV vulnerability database, and shows which have known problems and which version fixes them. It reports only; it never changes your projects." },
   leaks: { id: "leaks", title: "Secrets in your code", tool: "gitleaks",
     what: "If you write code, gitleaks scans a folder of git repositories for passwords and API keys that were committed by accident. Read-only: it reports, it never changes a repo." },
+  remote: { id: "remote", title: "Remote access", tool: "OpenSSH",
+    what: "An SSH server lets people log in to this computer over the network. Omarchy leaves it off. If you use it, keys are much safer than passwords, which can be guessed." },
 
   browser: { id: "browser", title: "Browser telemetry", tool: "Chromium",
     what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting; changing them comes in a later build, and will only ever touch the settings you tick." },
@@ -98,13 +100,15 @@ var CATALOG = {
   snap: { id: "snap", title: "Snapshots", tool: "Snapper · Limine",
     what: "A snapshot is a restore point for the system (not your home folder). To roll back, pick it from the boot menu." },
   disk: { id: "disk", title: "Disk usage", tool: "Disk usage",
-    what: "See which folders take the most space. Large caches and package downloads are normal; Cleanup handles those." }
+    what: "See which folders take the most space. Large caches and package downloads are normal; Cleanup handles those." },
+  failed: { id: "failed", title: "Failed services", tool: "systemd",
+    what: "Background services that stopped with an error. Many are harmless — a feature your hardware doesn't have — but a new one can mean something stopped working." }
 }
 
 var LAYOUT = [
-  { id: "security", name: "Security", checks: ["audit", "av", "upd", "fw", "leaks", "deps"] },
+  { id: "security", name: "Security", checks: ["audit", "av", "upd", "fw", "remote", "leaks", "deps"] },
   { id: "privacy", name: "Privacy", checks: ["browser", "netpriv", "apps", "cam", "traces", "perms"] },
-  { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk"] }
+  { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk", "failed"] }
 ]
 
 // ---------------------------------------------------------------- security
@@ -260,6 +264,38 @@ function firewall(p) {
   return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "good", status: "On — blocks incoming, allows outgoing",
     meta: plural(p.rules, "rule", "rules") + (p.gufw ? " · edit in GufW" : ""), facts: facts,
     actions: [gui, { label: "Turn off…", elevated: true, act: "ufw-off" }] })
+}
+
+function remote(p) {
+  var b = CATALOG.remote
+  if (!p.installed) return check(b, { kind: "good", status: "No remote login running", meta: "SSH server not installed" })
+  var on = p.active === "active" || p.enabled === "enabled" || p.socket === true
+  var keysOnly = p.passwords === false
+  var root = p.rootLogin === "yes" ? "Allowed, with a password" : p.rootLogin === "no" ? "Not allowed"
+    : p.rootLogin === "forced-commands-only" ? "Only for set commands" : "Keys only"
+  var facts = [
+    fact("Status", p.active === "active" ? "Running" : "Stopped", p.enabled === "enabled" ? "starts with the computer" : ""),
+    fact("Port", String(p.port || "22")),
+    fact("Password login", keysOnly ? "Off" : "On", p.keepwellKeysOnly ? KEEPWELL : "sshd_config"),
+    fact("Root login", root),
+    fact("Firewall", p.firewallAllows ? "Lets SSH in" : "Doesn't list SSH", "UFW"),
+    fact("Your keys", p.authorizedKeys ? plural(p.authorizedKeys, "key can log in as you", "keys can log in as you") : "None in ~/.ssh/authorized_keys")
+  ]
+  var off = { label: "Turn off SSH…", elevated: true, act: "ssh-off" }
+  if (!on) return check(b, { kind: "good", status: "No remote login running", meta: "SSH installed, turned off",
+    facts: facts.slice(2), note: "If you turn SSH on, use keys rather than passwords." })
+  var actions = keysOnly
+    ? [off].concat(p.keepwellKeysOnly ? [{ label: "Allow passwords again…", elevated: true, act: "ssh-keys-only-off" }] : [])
+    : p.authorizedKeys > 0 ? [{ label: "Allow keys only…", primary: true, elevated: true, act: "ssh-keys-only" }, off]
+    : [{ label: "Turn off SSH…", primary: true, elevated: true, act: "ssh-off" }]
+  if (keysOnly) return check(b, { kind: "good", status: "SSH is on, keys only", meta: "Port " + (p.port || "22"),
+    facts: facts, actions: actions })
+  return check(b, { kind: p.rootLogin === "yes" ? "crit" : "attn",
+    status: p.rootLogin === "yes" ? "SSH lets anyone try root's password" : "SSH is on and accepts passwords",
+    meta: "Port " + (p.port || "22") + (p.firewallAllows ? " · open in the firewall" : ""), facts: facts,
+    note: p.authorizedKeys > 0 ? "Keys only: the new setting is tested before SSH reloads, and an SSH session you have open stays open."
+      : "To allow keys only, first add your public key to ~/.ssh/authorized_keys (ssh-copy-id from the other computer), so you don't lock yourself out.",
+    actions: actions })
 }
 
 function leaks(tools, now) {
@@ -647,6 +683,19 @@ function schedules(doc, now) {
 
 // ---------------------------------------------------------------- assembly
 
+function failed(p) {
+  var b = CATALOG.failed
+  var units = Array.isArray(p.units) ? p.units : []
+  if (!units.length) return check(b, { kind: "good", status: "All services are running" })
+  return check(b, { kind: "info", status: plural(units.length, "service has failed", "services have failed"),
+    meta: [[units.filter(function(u) { return !u.user }).length, "system"], [units.filter(function(u) { return u.user }).length, "yours"]]
+      .filter(function(x) { return x[0] }).map(function(x) { return x[0] + " " + x[1] }).join(" · "),
+    facts: units.map(function(u) { return fact(u.user ? "Yours" : "System", u.description || u.unit, u.unit) }),
+    note: "Clearing the list forgets these failures; nothing is restarted. A service that fails again shows up again.",
+    actions: [{ label: "Show details", primary: true, act: "failed-details" },
+      { label: "Clear the list…", elevated: units.some(function(u) { return !u.user }), act: "failed-reset" }] })
+}
+
 function loading(id) {
   return check(CATALOG[id], { kind: "off", status: "Checking…", meta: "" })
 }
@@ -677,6 +726,7 @@ function build(doc, now) {
     av: function() { return antivirus(p("antivirus"), now) },
     upd: function() { return updates(p("updates"), now) },
     fw: function() { return firewall(p("firewall")) },
+    remote: function() { return remote(p("remote")) },
     leaks: function() { return leaks(p("tools"), now) },
     deps: function() { return deps(p("tools"), now) },
     browser: function() { return browser(p("browser"), p("chromiumPolicy")) },
@@ -688,16 +738,17 @@ function build(doc, now) {
     clean: function() { return cleanup(p("cleanup")) },
     unclaimed: function() { return unclaimed(p("unclaimed")) },
     snap: function() { return snapshots(p("snapshots"), now) },
-    disk: function() { return disk(p("disk")) }
+    disk: function() { return disk(p("disk")) },
+    failed: function() { return failed(p("failed")) }
   }
   var out = []
   for (var i = 0; i < LAYOUT.length; i++) {
     var s = LAYOUT[i]
     var checks = s.checks.map(function(id) {
       if (!probes) return loading(id)
-      var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", leaks: "tools",
+      var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", remote: "remote", leaks: "tools",
         deps: "tools", browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
-        clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk" }[id]
+        clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk", failed: "failed" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
         return check(CATALOG[id], { kind: "off", status: "Couldn't check this time", meta: "Try Refresh" })

@@ -162,14 +162,17 @@ def orphans():
     return [n for n in out.split() if re.fullmatch(r"[A-Za-z0-9@._+][A-Za-z0-9@._+-]{0,127}", n)][:50]
 
 
-def step(say, argv, root=False, password=False, stdin=None, verify=None):
+def step(say, argv, root=False, password=False, stdin=None, verify=None, undo=None, ok=(0,)):
     """One command. root: run through sudo. password: the command may ask
     for your password itself (Omarchy commands that call sudo). stdin: bytes
     fed to the command (file contents; shown in full before anything runs).
     verify: (path, expected_bytes, rollback_steps) checked after this step;
-    on a mismatch the rollback steps run at once."""
+    on a mismatch the rollback steps run at once. undo: steps that run if
+    this one fails (a config test that fails takes the new file back out).
+    ok: the exit codes that count as finished."""
     full = [SUDO, "--"] + argv if root else argv
-    return {"say": say, "argv": full, "root": root or password, "stdin": stdin, "verify": verify, "diff": None}
+    return {"say": say, "argv": full, "root": root or password, "stdin": stdin, "verify": verify,
+            "diff": None, "undo": undo or [], "ok": tuple(ok)}
 
 
 def pkg_add(*names):
@@ -258,6 +261,29 @@ ACTIONS = {
         title="Remove Chromium privacy policy",
         summary="Removes the policy file Keepwell installed. Chromium goes back to your profile's settings at its next start.",
         system=False, steps=lambda o: _policy_off()),
+    "ssh-off": dict(
+        title="Turn off SSH",
+        summary="Stops the SSH server and keeps it from starting with the computer. Nobody can log in to this computer over the network until you turn it on again.",
+        system=False, steps=lambda o: [
+            step("Stop SSH and don't start it at boot", ["/usr/bin/systemctl", "disable", "--now", "sshd.service"], root=True)]),
+    "ssh-keys-only": dict(
+        title="Allow SSH keys only",
+        summary="Makes the SSH server refuse passwords, so only someone with one of your SSH keys can log in. The new setting is tested before SSH reloads, and taken back out if the test fails.",
+        system=False, steps=lambda o: _ssh_keys_only()),
+    "ssh-keys-only-off": dict(
+        title="Allow SSH passwords again",
+        summary="Removes Keepwell's keys-only setting, so the SSH server goes back to its own settings.",
+        system=False, steps=lambda o: [
+            _remove_root("Remove Keepwell's keys-only setting", SSH_KEYS_ONLY),
+            step("Reload SSH", ["/usr/bin/systemctl", "try-reload-or-restart", "sshd.service"], root=True)]),
+    "failed-details": dict(
+        title="Show failed services",
+        summary="Shows each failed service's status and its last log lines, so you can see why it failed. Reads only.",
+        system=False, steps=lambda o: _failed_details()),
+    "failed-reset": dict(
+        title="Clear the failed list",
+        summary="Forgets that these services failed. Nothing is restarted or changed; any that fail again will show up again.",
+        system=False, steps=lambda o: _failed_reset()),
     "snapshot": dict(
         title="Take a snapshot",
         summary="Creates a restore point of the system (not your home folder), which you can boot into from the boot menu.",
@@ -637,6 +663,55 @@ def _policy_off():
     return [_remove_root("Remove Keepwell's privacy policy", POLICY)] if os.path.exists(POLICY) else []
 
 
+SSH_KEYS_ONLY = "/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf"
+
+
+def _ssh_keys_only():
+    test_undo = [_remove_root("Take the keys-only setting back out", SSH_KEYS_ONLY)]
+    return [
+        _write_root("Refuse password logins", SSH_KEYS_ONLY,
+                    "# Written by the Keepwell plugin; Allow passwords again in Keepwell removes it.\n"
+                    "PasswordAuthentication no\nKbdInteractiveAuthentication no\n"),
+        step("Test SSH's settings", ["/usr/bin/sshd", "-t"], root=True, undo=test_undo),
+        step("Reload SSH", ["/usr/bin/systemctl", "try-reload-or-restart", "sshd.service"], root=True),
+    ]
+
+
+def _failed_units():
+    units = []
+    for scope in ([], ["--user"]):
+        out = capture(["/usr/bin/systemctl"] + scope + ["list-units", "--state=failed", "--output=json", "--no-pager"],
+                      timeout=5, cap=256 * 1024)
+        try:
+            items = json.loads(out) if out.strip() else []
+        except ValueError:
+            items = []
+        for it in items[:30] if isinstance(items, list) else []:
+            unit = str((it or {}).get("unit", ""))
+            if re.fullmatch(r"[A-Za-z0-9@._:\\-]{1,128}\.(service|socket|path|timer|mount|target|swap|automount|slice|scope)", unit):
+                units.append((scope, unit))
+    return units
+
+
+def _failed_details():
+    steps = []
+    for scope, unit in _failed_units()[:20]:
+        steps.append(step("Status of " + unit, ["/usr/bin/systemctl"] + scope + ["status", "--no-pager", "--lines=15", "--", unit], ok=(0, 3)))
+    return steps
+
+
+def _failed_reset():
+    units = _failed_units()
+    system = [u for scope, u in units if not scope]
+    user = [u for scope, u in units if scope]
+    steps = []
+    if system:
+        steps.append(step("Forget the system services' failures", ["/usr/bin/systemctl", "reset-failed", "--"] + system, root=True))
+    if user:
+        steps.append(step("Forget your services' failures", ["/usr/bin/systemctl", "--user", "reset-failed", "--"] + user))
+    return steps
+
+
 def _snapshot():
     return step("Create a system snapshot", [OMARCHY, "snapshot", "create"], password=True)
 
@@ -757,6 +832,8 @@ def apply(action_id, snapshot, chosen=None):
     for n, (s, raw) in enumerate(zip(p["steps"], p["_steps"]), 1):
         print(f"\n{BOLD}[{n}/{len(p['steps'])}] {s['say']}{RESET}")
         rc = run_step(raw)
+        if rc in raw.get("ok", (0,)):
+            rc = 0
         if rc == 0 and raw["verify"]:
             path, expected, rollback = raw["verify"]
             if read_root_file(path) != expected:
@@ -765,6 +842,11 @@ def apply(action_id, snapshot, chosen=None):
                     print(f"  $ {shlex.join(r['argv'])}")
                     run_step(r)
                 rc = 3
+        if rc != 0 and raw.get("undo"):
+            print(f"{BOLD}That didn't pass, so the change is being taken back out:{RESET}")
+            for r in raw["undo"]:
+                print(f"  $ {shlex.join(r['argv'])}")
+                run_step(r)
         if rc != 0:
             print(f"\n{BOLD}Step {n} did not finish (exit {rc}).{RESET} Nothing after it was run.")
             wait_enter("\nPress Enter to close and return to Keepwell. ")
