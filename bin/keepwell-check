@@ -1,0 +1,551 @@
+#!/usr/bin/python3 -I -S
+"""Keepwell's read-only system check.
+
+Measures; never changes anything. Prints one JSON document on stdout:
+
+    {"v": 1, "at": <epoch>, "network": <bool>, "probes": {<id>: {...}}}
+
+Wording lives in the plugin (model/Present.js); this script only reports
+facts, so its output stays small and strictly shaped.
+
+Usage: keepwell-check [--network]
+
+  --network   also run arch-audit, which downloads the Arch security tracker
+              data from https://security.archlinux.org. Without it, nothing
+              here touches the network.
+
+Every command runs from an absolute path, with a fixed environment, in its
+own session, under a deadline and a byte cap; overflow or timeout kills the
+whole process group. Files the user owns are opened once with O_NOFOLLOW and
+checked on the descriptor before they are read, and reads are capped.
+"""
+
+import calendar
+import json
+import os
+import re
+import select
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+START = time.monotonic()
+TOTAL_BUDGET = 25.0          # seconds for the whole run
+OUT_LIMIT = 64 * 1024        # bytes of JSON we are willing to print
+HOME = os.path.expanduser("~")
+UID = os.geteuid()
+ENV = {"PATH": "/usr/bin", "LC_ALL": "C", "HOME": HOME}
+if os.environ.get("XDG_RUNTIME_DIR", "").startswith("/run/user/"):
+    ENV["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
+
+
+def remaining():
+    return TOTAL_BUDGET - (time.monotonic() - START)
+
+
+# ---------------------------------------------------------------- output hygiene
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f‎‏‪-‮⁦-⁩]")
+
+
+def clean(value, limit=120):
+    """A string safe to hand to the shell UI: no controls, no markup, capped."""
+    s = _CONTROL.sub("", str(value))
+    s = s.replace("<", "").replace(">", "").replace("&", "")
+    return s[:limit]
+
+
+def exists(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+# ---------------------------------------------------------------- bounded commands
+
+def run(argv, timeout=5.0, cap=256 * 1024):
+    """Run argv; return (returncode, stdout bytes) or (None, b"") on timeout,
+    overflow or failure to start. stderr is discarded."""
+    timeout = min(timeout, max(0.5, remaining()))
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=ENV, cwd="/",
+                                start_new_session=True, close_fds=True)
+    except OSError:
+        return None, b""
+    deadline = time.monotonic() + timeout
+    chunks, size, failed = [], 0, False
+    fd = proc.stdout.fileno()
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                failed = True
+                break
+            ready, _, _ = select.select([fd], [], [], left)
+            if not ready:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > cap:
+                failed = True
+                break
+            chunks.append(chunk)
+    finally:
+        if failed:
+            _kill_group(proc)
+        proc.stdout.close()
+        try:
+            proc.wait(timeout=max(0.1, deadline - time.monotonic()) if not failed else 2)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.wait()
+    if failed:
+        return None, b""
+    return proc.returncode, b"".join(chunks)
+
+
+def _kill_group(proc):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            proc.wait(timeout=1)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def text(argv, **kw):
+    rc, out = run(argv, **kw)
+    return rc, out.decode("utf-8", "replace")
+
+
+def unit_state(unit):
+    """(enabled, active) for a system unit, as systemctl's own words."""
+    _, en = text(["/usr/bin/systemctl", "is-enabled", "--", unit], timeout=3, cap=256)
+    _, ac = text(["/usr/bin/systemctl", "is-active", "--", unit], timeout=3, cap=256)
+    return clean(en.strip(), 20) or "unknown", clean(ac.strip(), 20) or "unknown"
+
+
+# ---------------------------------------------------------------- bounded files
+
+def read_file(path, cap, user_owned=False, tail=False):
+    """Read up to `cap` bytes through one descriptor. Returns bytes or None.
+
+    user_owned: the file must belong to us and not be hard-linked; files in
+    root-owned system directories are only required to be regular files.
+    tail: read the last `cap` bytes instead of refusing a larger file.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if user_owned and (st.st_uid != UID or st.st_nlink != 1):
+            return None
+        if st.st_size > cap:
+            if not tail:
+                return None
+            os.lseek(fd, st.st_size - cap, os.SEEK_SET)
+        os.set_blocking(fd, True)
+        data = bytearray()
+        while len(data) <= cap:
+            chunk = os.read(fd, min(65536, cap + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > cap:
+            return None
+        return bytes(data)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def mtime(path):
+    try:
+        st = os.stat(path, follow_symlinks=False)
+        return int(st.st_mtime) if stat.S_ISREG(st.st_mode) else None
+    except OSError:
+        return None
+
+
+def tree_size(root, budget_entries=200000, budget_seconds=4.0):
+    """Bytes under root, never following symlinks. Returns (bytes, complete)."""
+    total, seen, complete = 0, 0, True
+    stop_at = time.monotonic() + min(budget_seconds, max(0.2, remaining() - 2))
+    stack = [root]
+    while stack:
+        if time.monotonic() > stop_at or seen > budget_entries:
+            complete = False
+            break
+        path = stack.pop()
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    seen += 1
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append(entry.path)
+                    elif stat.S_ISREG(st.st_mode):
+                        total += st.st_blocks * 512
+        except OSError:
+            continue
+    return total, complete
+
+
+def own_processes(budget=4000):
+    """{comm: count} for this user's processes, from /proc (bounded)."""
+    found = {}
+    try:
+        with os.scandir("/proc") as it:
+            for n, entry in enumerate(it):
+                if n > budget:
+                    break
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    if entry.stat(follow_symlinks=False).st_uid != UID:
+                        continue
+                    raw = read_file("/proc/%s/comm" % entry.name, 64)
+                except OSError:
+                    continue
+                if raw:
+                    comm = raw.decode("utf-8", "replace").strip()
+                    found[comm] = found.get(comm, 0) + 1
+    except OSError:
+        pass
+    return found
+
+
+def size_from_human(s):
+    """'493.66 MiB' -> bytes (int) or None."""
+    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|B)\s*", s)
+    if not m:
+        return None
+    mult = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40,
+            "KB": 10 ** 3, "MB": 10 ** 6, "GB": 10 ** 9, "TB": 10 ** 12}.get(m.group(2))
+    return int(float(m.group(1)) * mult) if mult else None
+
+
+# ---------------------------------------------------------------- probes
+
+def probe_firewall():
+    p = {"installed": exists("/usr/bin/ufw"), "gufw": exists("/usr/bin/gufw")}
+    if not p["installed"]:
+        return p
+    conf = read_file("/etc/ufw/ufw.conf", 16384) or b""
+    m = re.search(rb"(?m)^ENABLED=(yes|no)\s*$", conf)
+    p["enabled"] = (m.group(1) == b"yes") if m else None
+    defaults = read_file("/etc/default/ufw", 16384) or b""
+    for key, name in ((b"DEFAULT_INPUT_POLICY", "incoming"), (b"DEFAULT_OUTPUT_POLICY", "outgoing")):
+        m = re.search(rb'(?m)^' + key + rb'="?(ACCEPT|DROP|REJECT)"?\s*$', defaults)
+        p[name] = m.group(1).decode().lower() if m else None
+    rules = 0
+    for f in ("/etc/ufw/user.rules", "/etc/ufw/user6.rules"):
+        raw = read_file(f, 1 << 20)
+        if raw:
+            rules += len(re.findall(rb"(?m)^### tuple ###", raw))
+    p["rules"] = rules
+    p["unitEnabled"], p["unitActive"] = unit_state("ufw.service")
+    return p
+
+
+SEVERITIES = ("Critical", "High", "Medium", "Low", "Unknown")
+
+
+def probe_audit(network):
+    p = {"installed": exists("/usr/bin/arch-audit"), "ran": False}
+    if not p["installed"] or not network:
+        return p
+    rc, out = text(["/usr/bin/arch-audit", "--color", "never", "--format", "%n\t%s\t%v"],
+                   timeout=30, cap=512 * 1024)
+    if rc is None or rc not in (0, 1):
+        p["error"] = True
+        return p
+    counts = dict.fromkeys(SEVERITIES, 0)
+    packages = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or not re.fullmatch(r"[A-Za-z0-9@._+-]{1,128}", parts[0]):
+            continue
+        sev = parts[1] if parts[1] in SEVERITIES else "Unknown"
+        counts[sev] += 1
+        if len(packages) < 40:
+            fixed = parts[2].strip()
+            packages.append({"name": clean(parts[0], 64), "severity": sev,
+                             "fixed": clean(fixed, 64) if re.fullmatch(r"[A-Za-z0-9.:+~_-]{1,64}", fixed) else ""})
+    p.update(ran=True, counts=counts, packages=packages)
+    return p
+
+
+def probe_antivirus():
+    p = {"clamav": exists("/usr/bin/clamscan"), "clamtk": exists("/usr/bin/clamtk")}
+    if not p["clamav"]:
+        return p
+    newest = None
+    for name in ("daily.cld", "daily.cvd", "main.cld", "main.cvd"):
+        t = mtime("/var/lib/clamav/" + name)
+        if t and (newest is None or t > newest):
+            newest = t
+    p["definitionsAt"] = newest
+    p["freshclamEnabled"], p["freshclamActive"] = unit_state("clamav-freshclam.service")
+    # ClamTK keeps its schedule as tagged lines in the user's crontab.
+    p["cron"] = exists("/usr/bin/crontab")
+    if p["cron"]:
+        _, tab = text(["/usr/bin/crontab", "-l"], timeout=3, cap=64 * 1024)
+        for line in tab.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            m = re.match(r"\s*([0-9]{1,2})\s+([0-9]{1,2})\s", line)
+            if not m:
+                continue
+            when = "%02d:%02d" % (int(m.group(2)) % 24, int(m.group(1)) % 60)
+            if line.rstrip().endswith("# clamtk-scan"):
+                p["scanAt"] = when
+            elif line.rstrip().endswith("# clamtk-defs"):
+                p["defsAt"] = when
+    last = None
+    try:
+        with os.scandir(os.path.join(HOME, ".clamtk", "history")) as it:
+            for n, entry in enumerate(it):
+                if n > 2000:
+                    break
+                if entry.name.endswith(".log"):
+                    t = mtime(entry.path)
+                    if t and (last is None or t > last):
+                        last = t
+    except OSError:
+        pass
+    p["lastScanAt"] = last
+    return p
+
+
+def probe_updates():
+    raw = read_file("/var/log/pacman.log", 1 << 20, tail=True)
+    last = None
+    if raw:
+        for m in re.finditer(rb"(?m)^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{4})\] \[PACMAN\] starting full system upgrade", raw):
+            last = m
+    if not last:
+        return {"lastUpgradeAt": None}
+    return {"lastUpgradeAt": _epoch(last.group(1).decode(), last.group(2).decode())}
+
+
+def _epoch(stamp, offset):
+    """'2026-10-18T11:09:24', '-0400' -> UTC epoch seconds."""
+    t = time.strptime(stamp, "%Y-%m-%dT%H:%M:%S")
+    sign = -1 if offset[0] == "-" else 1
+    secs = sign * (int(offset[1:3]) * 3600 + int(offset[3:5]) * 60)
+    return calendar.timegm(t) - secs
+
+
+def probe_media(procs):
+    p = {"microphones": 0, "cameras": 0, "micUsers": [], "cameraUsers": []}
+    rc, out = run(["/usr/bin/pw-dump"], timeout=5, cap=8 << 20)
+    if rc is None:
+        p["error"] = True
+        return p
+    try:
+        nodes = json.loads(out)
+    except ValueError:
+        p["error"] = True
+        return p
+    if not isinstance(nodes, list):
+        p["error"] = True
+        return p
+    mic_users, cam_users = set(), set()
+    for o in nodes[:5000]:
+        if not isinstance(o, dict) or o.get("type") != "PipeWire:Interface:Node":
+            continue
+        info = o.get("info") if isinstance(o.get("info"), dict) else {}
+        props = info.get("props") if isinstance(info.get("props"), dict) else {}
+        mc = str(props.get("media.class", ""))
+        state = info.get("state")
+        app = clean(props.get("application.name") or props.get("node.name") or "an app", 48)
+        if mc == "Audio/Source":
+            p["microphones"] += 1
+        elif mc == "Video/Source":
+            p["cameras"] += 1
+        elif mc == "Stream/Input/Audio" and state == "running":
+            mic_users.add(app)
+        elif mc == "Stream/Input/Video" and state == "running":
+            cam_users.add(app)
+    p["micUsers"] = sorted(mic_users)[:8]
+    p["cameraUsers"] = sorted(cam_users)[:8]
+    return p
+
+
+def probe_permissions():
+    p = {"flatpak": exists("/usr/bin/flatpak"), "flatseal": False, "apps": 0}
+    if not p["flatpak"]:
+        return p
+    _, out = text(["/usr/bin/flatpak", "list", "--app", "--columns=application"], timeout=8, cap=256 * 1024)
+    ids = [l.strip() for l in out.splitlines() if re.fullmatch(r"[A-Za-z0-9._-]{3,255}", l.strip())]
+    p["apps"] = len(ids)
+    p["flatseal"] = "com.github.tchx84.Flatseal" in ids
+    return p
+
+
+def _json_file(path, cap):
+    raw = read_file(path, cap, user_owned=True)
+    if raw is None:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _dig(doc, *keys):
+    for k in keys:
+        if not isinstance(doc, dict) or k not in doc:
+            return None
+        doc = doc[k]
+    return doc if isinstance(doc, bool) else None
+
+
+def probe_browser(procs):
+    base = os.path.join(HOME, ".config", "chromium")
+    p = {"chromium": exists("/usr/bin/chromium"), "firefox": exists("/usr/bin/firefox")}
+    if not p["chromium"]:
+        return p
+    p["running"] = procs.get("chromium", 0) > 0
+    local = _json_file(os.path.join(base, "Local State"), 4 << 20)
+    prefs = _json_file(os.path.join(base, "Default", "Preferences"), 16 << 20)
+    p["profile"] = local is not None and prefs is not None
+    # True / False when the profile sets it; null when the browser default applies.
+    p["metrics"] = _dig(local, "user_experience_metrics", "reporting_enabled")
+    p["searchSuggest"] = _dig(prefs, "search", "suggest_enabled")
+    p["safeBrowsing"] = _dig(prefs, "safebrowsing", "enabled")
+    p["safeBrowsingReports"] = _dig(prefs, "safebrowsing", "scout_reporting_enabled")
+    return p
+
+
+def probe_apps():
+    """Apps known to send usage data, and their opt-out where it can be read."""
+    apps = []
+    if exists("/usr/bin/code"):
+        raw = read_file(os.path.join(HOME, ".config", "Code", "User", "settings.json"), 1 << 20, user_owned=True)
+        level = None
+        if raw is not None:
+            m = re.search(rb'"telemetry\.telemetryLevel"\s*:\s*"(all|error|crash|off)"', raw)
+            level = m.group(1).decode() if m else "default"
+        apps.append({"id": "vscode", "state": level})
+    for app_id, binary in (("spotify", "/usr/bin/spotify"), ("discord", "/usr/bin/discord"),
+                           ("steam", "/usr/bin/steam")):
+        if exists(binary):
+            apps.append({"id": app_id, "state": None})
+    return {"apps": apps}
+
+
+def probe_traces():
+    p = {}
+    raw = read_file(os.path.join(HOME, ".local", "share", "recently-used.xbel"), 16 << 20, user_owned=True)
+    p["recentFiles"] = raw.count(b"<bookmark ") if raw is not None else None
+    raw = read_file(os.path.join(HOME, ".bash_history"), 32 << 20, user_owned=True)
+    p["historyLines"] = raw.count(b"\n") if raw is not None else None
+    size, complete = tree_size(os.path.join(HOME, ".cache", "thumbnails"), budget_seconds=1.5)
+    p["thumbnailBytes"], p["thumbnailsComplete"] = size, complete
+    return p
+
+
+def probe_cleanup():
+    p = {}
+    if exists("/usr/bin/paccache"):
+        for key, keep in (("pkgCache", "3"), ("pkgCacheAll", "1")):
+            _, out = text(["/usr/bin/paccache", "-d", "-k", keep], timeout=10, cap=256 * 1024)
+            m = re.search(r"finished dry run: (\d+) candidates \(disk space saved: ([^)]+)\)", out)
+            p[key] = {"count": int(m.group(1)), "bytes": size_from_human(m.group(2))} if m \
+                else {"count": 0, "bytes": 0}
+    rc, out = text(["/usr/bin/pacman", "-Qtdq"], timeout=8, cap=256 * 1024)
+    names = [l for l in out.splitlines() if re.fullmatch(r"[A-Za-z0-9@._+-]{1,128}", l)]
+    orphans = {"count": len(names), "names": [clean(n, 64) for n in names[:30]], "bytes": 0}
+    if names:
+        _, info = text(["/usr/bin/pacman", "-Qi", "--"] + names[:200], timeout=8, cap=4 << 20)
+        for m in re.finditer(r"(?m)^Installed Size\s*:\s*(.+)$", info):
+            orphans["bytes"] += size_from_human(m.group(1)) or 0
+    p["orphans"] = orphans
+    size, complete = tree_size(os.path.join(HOME, ".cache"))
+    p["homeCache"] = {"bytes": size, "complete": complete}
+    _, out = text(["/usr/bin/journalctl", "--disk-usage"], timeout=5, cap=4096)
+    m = re.search(r"take up ([0-9.]+)([KMGT]?)\b", out)
+    if m:
+        mult = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}[m.group(2)]
+        p["journalBytes"] = int(float(m.group(1)) * mult)
+    return p
+
+
+def probe_snapshots():
+    p = {"snapper": exists("/usr/bin/snapper"),
+         "rootConfig": os.path.isfile("/etc/snapper/configs/root"),
+         "omarchySnapshot": exists("/usr/bin/omarchy-snapshot") or exists("/usr/share/omarchy/bin/omarchy-snapshot")}
+    if p["snapper"]:
+        p["limineSync"], _ = unit_state("limine-snapper-sync.service")
+    return p
+
+
+def probe_disk():
+    try:
+        st = os.statvfs("/")
+    except OSError:
+        return {}
+    size = st.f_blocks * st.f_frsize
+    free = st.f_bavail * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    return {"size": size, "used": used, "free": free,
+            "baobab": exists("/usr/bin/baobab")}
+
+
+def probe_tools():
+    return {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    network = "--network" in sys.argv[1:]
+    procs = own_processes()
+    probes = {}
+    for name, fn in (("firewall", probe_firewall),
+                     ("audit", lambda: probe_audit(network)),
+                     ("antivirus", probe_antivirus),
+                     ("updates", probe_updates),
+                     ("tools", probe_tools),
+                     ("media", lambda: probe_media(procs)),
+                     ("permissions", probe_permissions),
+                     ("browser", lambda: probe_browser(procs)),
+                     ("apps", probe_apps),
+                     ("traces", probe_traces),
+                     ("snapshots", probe_snapshots),
+                     ("disk", probe_disk),
+                     ("cleanup", probe_cleanup)):
+        if remaining() <= 0.5:
+            probes[name] = {"skipped": True}
+            continue
+        try:
+            probes[name] = fn()
+        except Exception:  # one broken probe must not cost the others
+            probes[name] = {"error": True}
+    doc = json.dumps({"v": 1, "at": int(time.time()), "network": network, "probes": probes},
+                     separators=(",", ":"), ensure_ascii=True)
+    if len(doc) > OUT_LIMIT:
+        sys.exit(3)
+    sys.stdout.write(doc)
+
+
+if __name__ == "__main__":
+    main()

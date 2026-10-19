@@ -17,7 +17,10 @@ Item {
 
   property var sections: []
   property string checkedAt: ""
-  property bool preview: false
+  property bool checking: false
+
+  // network: also ask the Arch security tracker (arch-audit).
+  signal checkRequested(bool network)
 
   readonly property bool shown: window.visible
 
@@ -71,9 +74,13 @@ Item {
   function activateAction(i) {
     var actions = check.actions || []
     if (i < 0 || i >= actions.length || actions[i].disabled) return
-    // Actions arrive with the real checks; until then say so rather than
-    // pretend something happened.
-    notice = "Preview build — “" + actions[i].label + "” isn't wired up yet."
+    if (actions[i].run === "network") {
+      checkRequested(true)
+      return
+    }
+    // Installs, terminals and trash arrive in the next build; until then say
+    // so rather than pretend something happened.
+    notice = "“" + actions[i].label + "” arrives in the next build."
   }
 
   function primaryIndex() {
@@ -107,8 +114,8 @@ Item {
     Rectangle {
       id: card
       anchors.centerIn: parent
-      width: Math.round(Math.min(Tokens.sp(1120), window.width * 0.9))
-      height: Math.round(Math.min(Tokens.sp(720), window.height * 0.9))
+      width: Math.round(Math.min(Tokens.sp(1240), window.width * 0.9))
+      height: Math.round(Math.min(Tokens.sp(760), window.height * 0.9))
       color: Tokens.bg
       radius: Tokens.radius
       border.width: Tokens.border
@@ -179,7 +186,8 @@ Item {
             }
             ActionButton {
               label: "Check again"
-              onActivated: root.notice = "Preview build — checks run once the helpers land."
+              enabledAction: !root.checking
+              onActivated: { root.notice = ""; root.checkRequested(true) }
             }
             ActionButton {
               label: "Close"
@@ -195,6 +203,9 @@ Item {
 
             // ---------------- rail ----------------
             ColumnLayout {
+              // A nested layout fills by default; the rail must not, or it
+              // takes the width the detail pane needs.
+              Layout.fillWidth: false
               Layout.preferredWidth: Tokens.sp(220)
               Layout.fillHeight: true
               Layout.margins: Tokens.sp(10)
@@ -260,15 +271,19 @@ Item {
 
                 Flickable {
                   id: listFlick
-                  Layout.preferredWidth: Tokens.sp(330)
+                  Layout.preferredWidth: Tokens.sp(310)
                   Layout.fillHeight: true
                   contentHeight: list.implicitHeight
                   clip: true
                   boundsBehavior: Flickable.StopAtBounds
 
+                  ScrollHint { flick: listFlick }
+
+                  // Rows keep a fixed height whatever their width, so room for
+                  // the scroll hint is only taken when the list overflows.
                   Column {
                     id: list
-                    width: listFlick.width
+                    width: listFlick.width - (listFlick.contentHeight > listFlick.height + 1 ? Tokens.sp(8) : 0)
                     spacing: Tokens.sp(6)
                     Repeater {
                       model: root.checks
@@ -315,7 +330,7 @@ Item {
             }
             Item { Layout.fillWidth: true }
             KText {
-              text: root.notice !== "" ? root.notice : (root.preview ? "Preview build · sample data" : "")
+              text: root.notice
               font.pixelSize: Tokens.caption
               color: root.notice !== "" ? Tokens.fg2 : Tokens.fg3
             }
