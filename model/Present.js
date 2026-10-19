@@ -293,7 +293,7 @@ function outside(p, perms, now) {
   var actions = flatpaks ? [{ label: "Update Flatpak apps…", primary: true, act: "flatpak-update" }] : []
   var shadows = hand.filter(function(h) { return h.shadows })
   if (!count) return check(b, { kind: "good", status: "omarchy update covers everything",
-    meta: inAur.length ? "Packages, " + plural(inAur.length, "AUR package", "AUR packages") + " and mise tools" : "Packages and mise tools",
+    meta: inAur.length ? "Includes " + plural(inAur.length, "AUR package", "AUR packages") : "Packages and mise tools",
     facts: facts })
   return check(b, { kind: shadows.length ? "attn" : "info",
     status: shadows.length ? shadows[0].name + " in " + shadows[0].where + " hides the packaged one"
