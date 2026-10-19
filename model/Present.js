@@ -155,8 +155,11 @@ function audit(p, net, now) {
   var facts = pkgs.slice().sort(function(x, y) {
     return (x.fixed ? 0 : 1) - (y.fixed ? 0 : 1) || order[x.severity] - order[y.severity]
   }).map(function(x) {
-    return fact(x.name, x.severity + " · " + auditKinds(x.kinds),
+    var f = fact(x.name, x.severity + " · " + auditKinds(x.kinds),
       (x.fixed ? "fixed in " + x.fixed + " — update" : "no fix released yet") + (x.cves ? " · " + plural(x.cves, "CVE", "CVEs") : ""))
+    // Each package's page on the tracker lists its CVEs and their details.
+    if (/^[A-Za-z0-9@._+-]{1,128}$/.test(x.name)) f.url = "https://security.archlinux.org/package/" + x.name
+    return f
   })
   if (pkgs.length === 0) facts.push(fact("Packages", "No known issues"))
 
@@ -172,7 +175,7 @@ function audit(p, net, now) {
     ? "Updating installs the fixed versions. Issues still waiting for a fix need nothing from you yet."
     : "There is nothing to do right now: no fixed versions have been released. They arrive through normal updates, and Keepwell will flag them when they do. Most of these need someone to send you a specially crafted file or page."
   return check(b, { kind: kind, status: status, meta: meta, facts: facts,
-    note: whatNow + " " + note,
+    note: whatNow + " Click a package to see its CVEs on the Arch security tracker. " + note,
     actions: (fixable.length ? [{ label: "Update system", primary: true, elevated: true, act: "update" }] : [])
       .concat([{ label: "Check again", run: "network" }, { label: "Arch security tracker ↗", url: "https://security.archlinux.org/" }]) })
 }
@@ -264,16 +267,17 @@ function leaks(tools, now) {
     meta: "Finds keys and passwords committed to git", facts: [fact("Installed", "No")],
     actions: [install("Install gitleaks", "install-gitleaks")] })
   var last = tools.leaks
-  var choose = { label: last ? "Choose another folder…" : "Choose a folder…", primary: !last, pick: "leaks" }
+  var home = { label: "Scan home folder", primary: !last, rescan: "leaks", folder: "~" }
+  var choose = { label: "Choose another folder…", pick: "leaks" }
   if (tools.leaksScanning) return check(b, { kind: "info", status: "Scanning in the background…",
     meta: "You'll get a notification when it's done", facts: last ? [fact("Folder", last.folder)] : [],
     actions: [{ label: "Stop scan", primary: true, stop: "gitleaks" }] })
-  if (!last) return check(b, { kind: "off", status: "Ready — choose a folder to scan",
+  if (!last) return check(b, { kind: "off", status: "Ready to scan",
     meta: "Read-only: it reports, it never changes a repo", facts: [fact("Installed", "Yes")],
-    note: "Keepwell looks for git repositories in the folder you pick (up to four levels down) and checks their history. Secrets are masked; only where they are is kept.",
-    actions: [choose] })
+    note: "Keepwell finds the git repositories in your home folder (up to four levels down, following links like ~/Projects) and checks their history in the background. Secrets are masked; only where they are is kept.",
+    actions: [home, choose] })
   var f = last.findings || []
-  var facts = [fact("Folder", last.folder), fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
+  var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder), fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
   for (var i = 0; i < Math.min(f.length, 30); i++)
     facts.push(fact(f[i].repo, f[i].file + (f[i].line ? ":" + f[i].line : ""), f[i].rule + (f[i].commit ? " · " + f[i].commit : "")))
   return check(b, { kind: f.length ? "attn" : "good",
@@ -282,7 +286,8 @@ function leaks(tools, now) {
     meta: "Scanned " + ago(last.at, now) + " · " + plural(last.repos, "repository", "repositories"),
     facts: facts,
     note: f.length ? "Each line is a file and line where something looks like a key or password, and the commit it was added in. If it's real, change that password or key — removing it from the file doesn't remove it from git history." : "",
-    actions: [{ label: "Scan again", primary: f.length > 0, rescan: "leaks", folder: last.folder }, choose] })
+    actions: [{ label: "Scan again", primary: f.length > 0, rescan: "leaks", folder: last.folder }]
+      .concat(last.folder === "~" ? [choose] : [home, choose]) })
 }
 
 // ---------------------------------------------------------------- privacy

@@ -58,8 +58,9 @@ The bar icon lands on the right of the bar; move it with
 ## IPC
 
 The plugin registers one IPC target, `keepwell`, with parameterless methods
-only: `show`, `hide`, `open`, `close`, `toggle`. They open and close the window
-and do nothing else.
+only: `show`, `hide`, `open`, `close`, `toggle` open and close the window, and
+`refresh` re-runs the read-only local check (a finished scan calls it, so the
+result is already showing when you open Keepwell). Nothing else.
 
 ```bash
 omarchy-shell keepwell toggle
@@ -69,7 +70,8 @@ omarchy-shell keepwell toggle
 
 - Once when the shell starts, so the bar icon is meaningful.
 - When you open the window, if the last result is more than a minute old.
-- When you press **Check again**, and after an action's terminal closes.
+- When you press **Check again**, after an action's terminal closes, and
+  when a background scan ends.
 - Every 15 seconds while a scan you started is running **and** the window is
   open, so you see it end. Nothing polls otherwise.
 
@@ -113,8 +115,10 @@ when you ask:
 - **Known vulnerabilities** runs `arch-audit`, which downloads Arch's public
   security data from `https://security.archlinux.org` (on **Check now** or
   **Check again** — never at startup or on opening the window).
-- **Arch security tracker ↗** opens `https://security.archlinux.org/` in
-  your browser (`xdg-open`).
+- **Arch security tracker ↗**, and clicking a package under Known
+  vulnerabilities, open `https://security.archlinux.org/` or that package's
+  page (`/package/<name>`, which lists its CVEs) in your browser
+  (`xdg-open`).
 - Installs download from your Arch mirrors, and ClamAV's definition updates
   from ClamAV's servers, in the terminal after you confirm.
 
@@ -212,23 +216,28 @@ and disk priority, one of each kind at a time:
 ```bash
 systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
   --property=Nice=19 --property=IOSchedulingClass=idle \
-  --property=ExecStopPost=/usr/bin/notify-send --app-name=Keepwell "Virus scan ended" "…" \
+  --property=ExecStopPost=/usr/bin/python3 -I -S <plugin>/bin/keepwell-run notify clamscan \
   -- /usr/bin/clamscan --recursive --infected --log=<new log> [--exclude-dir=…] -- <folder>
 ```
 
 - **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~` but
   skips `~/.cache`, `~/.local/share/Trash` and Keepwell's own logs. A home
   scan can take half an hour or more.
-- **Choose a folder…** (Secrets in your code) opens a folder picker
-  (`zenity --file-selection --directory`, which Omarchy shows through the
-  desktop portal). Keepwell steps aside while it is open. In the folder you
-  pick it finds git repositories up to four levels down, never through a
-  symlink, at most 100, and runs
+- **Scan home folder** (Secrets in your code) looks through your home
+  folder; **Choose another folder…** opens a folder picker
+  (`zenity --file-selection --directory`, shown through the desktop portal)
+  while Keepwell steps aside. Keepwell finds git repositories up to four
+  levels down, skipping hidden folders and dependency folders such as
+  `node_modules`, at most 100. Symlinked folders are followed (`~/Projects`
+  is often one), but each real folder is visited once, so a link loop can't
+  trap the search. It runs
   `gitleaks git --redact --report-format json --report-path - -- <repo>` on
   each in the `keepwell-gitleaks` service. Only locations are kept (see
   `gitleaks.json` above).
 - **Stop scan** runs `systemctl --user stop` on that service.
-- When a scan ends (or is stopped), one desktop notification says so.
+- When a scan ends (or is stopped), `keepwell-run notify` reads the result,
+  sends one desktop notification that states it ("Downloads: nothing found,
+  1,204 files checked in 12 s."), and calls `omarchy-shell keepwell refresh`.
   Keepwell deletes, moves or changes nothing it finds; infected files are
   listed for you to decide on.
 

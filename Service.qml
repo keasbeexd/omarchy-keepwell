@@ -170,7 +170,8 @@ Scope {
       picker.start(python.concat([sourceDir + "/bin/keepwell-run", "pick-folder"]))
       return
     }
-    if (action.url === "https://security.archlinux.org/") {
+    if (typeof action.url === "string"
+        && /^https:\/\/security\.archlinux\.org\/(package\/[A-Za-z0-9@._+-]{1,128})?$/.test(action.url)) {
       Quickshell.execDetached(["/usr/bin/uwsm-app", "--", "/usr/bin/xdg-open", action.url])
       hide()
       return
@@ -575,7 +576,8 @@ Scope {
 
   function show(skipStaleCheck) {
     now = Date.now() / 1000
-    if (!skipStaleCheck && !checker.running && (!doc || now - doc.at > 60)) check(false)
+    // Stale, or showing a scan that may have ended since: look again.
+    if (!skipStaleCheck && !checker.running && (!doc || now - doc.at > 60 || scanning)) check(false)
     windowLoader.active = true
     if (windowLoader.item) {
       if (focusCheckId !== "") { windowLoader.item.focusCheck(focusCheckId); focusCheckId = "" }
@@ -587,10 +589,12 @@ Scope {
   function close() { hide() }
   function toggle() { if (opened) hide(); else show() }
 
-  // Parameterless on purpose: IPC can open and close the window, nothing
-  // more.
+  // Parameterless on purpose: IPC can open and close the window, and ask
+  // for a read-only re-check (a finished scan does, so its result is
+  // already showing when you open Keepwell). Nothing more.
   IpcHandler {
     target: "keepwell"
+    function refresh(): void { root.check(false) }
     function show(): void { root.show() }
     function hide(): void { root.hide() }
     function open(): void { root.open() }
