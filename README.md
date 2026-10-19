@@ -10,7 +10,7 @@ a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 0.9.0.** Every check reads your real system and every action
+> **Status: 1.0.0.** Every check reads your real system and every action
 > works. The quick checks run by themselves (at login and hourly) and notify
 > you when something newly needs attention; the deep scans — virus, secrets,
 > dependencies — run when you ask or on a schedule you choose.
