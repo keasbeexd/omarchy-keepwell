@@ -43,6 +43,7 @@ theme.
 | ← → / h l     | move through a check's actions|
 | Tab / Shift+Tab | next / previous section     |
 | Enter         | run the selected (or primary) action |
+| F5            | Refresh: run every quick check again now |
 | S             | checks and the deep-scan schedule |
 | R / D         | run / dismiss a missed scheduled scan |
 | Esc           | leave the actions, then close |
@@ -76,8 +77,9 @@ deep scans — run by themselves, with nothing to set up:
   in, including arch-audit (see Network);
 - when you open the window, if the last result is more than a minute old
   (the local checks; arch-audit's last result is shown with its time);
-- when you press **Refresh**, after an action's terminal closes, and when a
-  background scan ends.
+- when you press **Refresh** (or **F5**) — always, however recent the last
+  check, arch-audit included — after an action's terminal closes, and when
+  a background scan ends.
 
 They take about a second, only read, and change nothing. When a check newly
 needs attention (Review or Act now), the shield changes and Keepwell sends
