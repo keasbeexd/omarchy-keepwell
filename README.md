@@ -53,7 +53,7 @@ theme.
 ## Installing
 
 ```bash
-omarchy plugin add https://github.com/keasbeexd/keepwell.git --enable
+omarchy plugin add https://github.com/keasbeexd/omarchy-keepwell.git --enable
 ```
 
 The bar icon lands on the right of the bar; move it with
