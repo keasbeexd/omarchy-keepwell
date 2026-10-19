@@ -72,7 +72,7 @@ Item {
       ColumnLayout {
         Layout.fillWidth: true
         spacing: Tokens.sp(4)
-        KText { text: "SYSTEM CARE · BACKGROUND CHECKS"; font.pixelSize: Tokens.caption; font.letterSpacing: 0.6; color: Tokens.fg3 }
+        KText { text: "KEEPWELL · BACKGROUND CHECKS"; font.pixelSize: Tokens.caption; font.letterSpacing: 0.6; color: Tokens.fg3 }
         KText { text: "Background checks"; font.pixelSize: Tokens.heading; font.bold: true }
         KText {
           Layout.fillWidth: true

@@ -96,15 +96,13 @@ var CATALOG = {
   snap: { id: "snap", title: "Snapshots", tool: "Snapper · Limine",
     what: "A snapshot is a restore point for the system (not your home folder). To roll back, pick it from the boot menu." },
   disk: { id: "disk", title: "Disk usage", tool: "Disk usage",
-    what: "See which folders take the most space. Large caches and package downloads are normal; Cleanup handles those." },
-  timers: { id: "timers", title: "Background checks", tool: "Keepwell timer",
-    what: "On the days and at the time you choose, Keepwell can check for vulnerabilities, report reclaimable space and start a virus scan, then send one notification saying what it found. It never removes or changes anything on its own." }
+    what: "See which folders take the most space. Large caches and package downloads are normal; Cleanup handles those." }
 }
 
 var LAYOUT = [
   { id: "security", name: "Security", checks: ["audit", "av", "upd", "fw", "leaks"] },
   { id: "privacy", name: "Privacy", checks: ["browser", "netpriv", "apps", "cam", "traces", "perms"] },
-  { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk", "timers"] }
+  { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk"] }
 ]
 
 // ---------------------------------------------------------------- security
@@ -541,22 +539,27 @@ function dayWords(days) {
   return (days || []).map(function(x) { return DAY_NAMES[x] || x }).join(", ")
 }
 
-function timers(p, now) {
-  var b = CATALOG.timers
-  var setUp = { label: p.enabled ? "Change…" : "Set up…", primary: !p.enabled, schedule: true }
-  var last = p.last ? fact("Last check", ago(p.last.at, now) + " · " + p.last.summary) : null
-  if (!p.enabled) return check(b, { kind: "off", status: "Nothing runs in the background",
-    meta: "Optional checks on days you choose — notify, never act",
-    facts: [fact("Schedule", "Off")].concat(last ? [last] : []),
-    note: "Pick what to check (vulnerabilities, cleanup, a virus scan), the days and the time. Each run sends one notification saying what it found; it never removes, installs or changes anything.",
-    actions: [setUp] })
-  return check(b, { kind: "good",
-    status: dayWords(p.days) + " at " + p.time,
-    meta: (p.next ? "Next: " + p.next.replace(/:00 [A-Z]{2,5}$/, "") : "Scheduled") + " · notifies, never acts",
-    facts: [fact("Checks", (p.parts || []).map(function(x) { return PART_NAMES[x] || x }).join(", "), "keepwell-report.timer")]
-      .concat(last ? [last] : []),
-    note: (p.parts || []).indexOf("vulns") !== -1 ? "The vulnerability check downloads Arch's security list from security.archlinux.org." : "",
-    actions: [setUp, { label: "Turn off", scheduleOff: true }] })
+// systemd's "Tue 2026-10-20 11:00:00 EDT" as "Tue 20 Oct, 11:00".
+function nextWords(s) {
+  var m = /^(\w{3}) (\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2})/.exec(s)
+  if (!m) return s
+  var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  return m[1] + " " + Number(m[4]) + " " + months[Number(m[3]) - 1] + ", " + m[5]
+}
+
+// The background-check schedule, for the rail's footer: it's a setting of
+// Keepwell rather than a check of the system.
+function schedule(doc, now) {
+  var p = doc && doc.probes && doc.probes.schedule && typeof doc.probes.schedule === "object" ? doc.probes.schedule : {}
+  var last = p.last && typeof p.last.at === "number" ? ago(p.last.at, now) + " · " + p.last.summary : ""
+  if (!p.enabled) return { enabled: false, when: "Off", next: "", checks: "", last: last }
+  return {
+    enabled: true,
+    when: dayWords(p.days) + " at " + p.time,
+    next: p.next ? "Next: " + nextWords(p.next) : "",
+    checks: (p.parts || []).map(function(x) { return PART_NAMES[x] || x }).join(", "),
+    last: last
+  }
 }
 
 // ---------------------------------------------------------------- assembly
@@ -607,8 +610,7 @@ function build(doc, now) {
     clean: function() { return cleanup(p("cleanup")) },
     unclaimed: function() { return unclaimed(p("unclaimed")) },
     snap: function() { return snapshots(p("snapshots"), now) },
-    disk: function() { return disk(p("disk")) },
-    timers: function() { return timers(p("schedule"), now) }
+    disk: function() { return disk(p("disk")) }
   }
   var out = []
   for (var i = 0; i < LAYOUT.length; i++) {
@@ -617,7 +619,7 @@ function build(doc, now) {
       if (!probes) return loading(id)
       var probeName = { audit: "audit", av: "antivirus", upd: "updates", fw: "firewall", leaks: "tools",
         browser: "browser", netpriv: "netPrivacy", apps: "apps", cam: "media", traces: "traces", perms: "permissions",
-        clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk", timers: "schedule" }[id]
+        clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
         return check(CATALOG[id], { kind: "off", status: "Couldn't check this time", meta: "Try Check again" })

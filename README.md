@@ -45,6 +45,7 @@ theme.
 | ← → / h l     | move through a check's actions|
 | Tab / Shift+Tab | next / previous section     |
 | Enter         | run the selected (or primary) action |
+| S             | background checks             |
 | Esc           | leave the actions, then close |
 
 ## Installing
@@ -278,8 +279,11 @@ claims its name** and **nothing in it has changed** for the age you choose
 
 ### Background checks
 
-Off until you turn them on. **Set up…** on the Background checks card lets you
-pick what to check — vulnerabilities (arch-audit; uses the network), a
+Off until you turn them on. They live at the bottom of the left rail, since
+they're a setting of Keepwell rather than a check of your system: it shows
+the schedule, the next run and the last result, with **Set up…** (or
+**Change…** and **Turn off**); **S** opens it from anywhere. The sheet lets
+you pick what to check — vulnerabilities (arch-audit; uses the network), a
 cleanup report, a virus scan of Downloads or your home folder — and the days
 of the week and the time (30-minute steps). Saving writes two files and
 enables the timer, with no root and no terminal:
@@ -339,8 +343,8 @@ A scan that is running carries on until it ends, even after removal; stop it
 first with **Stop scan**, or with
 `systemctl --user stop keepwell-clamscan.service keepwell-gitleaks.service`.
 
-**If background checks are on, turn them off before removing** (Background
-checks → Turn off). Otherwise the timer stays and fails harmlessly each time,
+**If background checks are on, turn them off before removing** (**Turn off**
+at the bottom of the left rail). Otherwise the timer stays and fails harmlessly each time,
 since the script it runs is gone. To remove it by hand:
 
 ```bash

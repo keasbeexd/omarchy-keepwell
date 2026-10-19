@@ -18,8 +18,10 @@ Item {
   property var sections: []
   property string checkedAt: ""
   property bool checking: false
-  // "Off", or "Mon, Wed at 10:30", for the rail's footer.
-  property string scheduleWords: "Off"
+  // The background-check schedule (Present.schedule), shown in the rail.
+  property var schedule: ({ enabled: false, when: "Off", next: "", checks: "", last: "" })
+  signal scheduleRequested()
+  signal scheduleOffRequested()
 
   // network: also ask the Arch security tracker (arch-audit).
   signal checkRequested(bool network)
@@ -219,6 +221,8 @@ Item {
             if (actions.length > 0) root.actionCursor = Math.min(actions.length - 1, root.actionCursor + 1)
           } else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) {
             root.actionCursor = Math.max(-1, root.actionCursor - 1)
+          } else if (event.key === Qt.Key_S) {
+            root.scheduleRequested()
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.activateAction(root.actionCursor >= 0 ? root.actionCursor : root.primaryIndex())
           } else {
@@ -301,21 +305,68 @@ Item {
               Item { Layout.fillHeight: true }
 
               Rectangle { Layout.fillWidth: true; height: 1; color: Tokens.line }
-              Column {
+
+              // Background checks: a setting of Keepwell, so it lives here
+              // rather than among the checks. S opens it from anywhere.
+              ColumnLayout {
                 Layout.fillWidth: true
                 Layout.margins: Tokens.sp(4)
-                spacing: Tokens.sp(6)
-                KText {
-                  text: "Background checks: " + root.scheduleWords
-                  font.pixelSize: Tokens.small
-                  color: Tokens.fg2
+                spacing: Tokens.sp(4)
+                RowLayout {
+                  Layout.fillWidth: true
+                  KText {
+                    Layout.fillWidth: true
+                    text: "BACKGROUND CHECKS"
+                    font.pixelSize: Tokens.caption
+                    font.letterSpacing: 0.6
+                    color: Tokens.fg3
+                  }
+                  KText {
+                    text: root.schedule.enabled ? "ON" : "OFF"
+                    font.pixelSize: Tokens.caption
+                    font.bold: true
+                    color: root.schedule.enabled ? Tokens.fg : Tokens.fg3
+                  }
                 }
                 KText {
-                  width: parent.width
-                  text: root.scheduleWords === "Off" ? "Nothing runs unless you turn it on." : "Notifies only; never changes anything."
+                  Layout.fillWidth: true
+                  text: root.schedule.enabled ? root.schedule.when : "Nothing runs unless you turn it on."
                   font.pixelSize: Tokens.small
+                  font.bold: root.schedule.enabled
+                  color: root.schedule.enabled ? Tokens.fg : Tokens.fg2
+                  wrapMode: Text.WordWrap
+                }
+                KText {
+                  Layout.fillWidth: true
+                  visible: text !== ""
+                  text: root.schedule.enabled ? root.schedule.next : ""
+                  font.pixelSize: Tokens.small
+                  color: Tokens.fg2
+                  wrapMode: Text.WordWrap
+                }
+                KText {
+                  Layout.fillWidth: true
+                  visible: text !== ""
+                  text: root.schedule.last ? "Last: " + root.schedule.last : ""
+                  font.pixelSize: Tokens.caption
                   color: Tokens.fg3
                   wrapMode: Text.WordWrap
+                  maximumLineCount: 3
+                  elide: Text.ElideRight
+                }
+                Flow {
+                  Layout.fillWidth: true
+                  Layout.topMargin: Tokens.sp(4)
+                  spacing: Tokens.sp(6)
+                  ActionButton {
+                    label: root.schedule.enabled ? "Change…" : "Set up…"
+                    onActivated: root.scheduleRequested()
+                  }
+                  ActionButton {
+                    visible: root.schedule.enabled
+                    label: "Turn off"
+                    onActivated: root.scheduleOffRequested()
+                  }
                 }
               }
             }
@@ -393,7 +444,7 @@ Item {
             spacing: Tokens.sp(18)
 
             Repeater {
-              model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["Esc", "close"]]
+              model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["S", "schedule"], ["Esc", "close"]]
               delegate: Row {
                 required property var modelData
                 spacing: Tokens.sp(6)
