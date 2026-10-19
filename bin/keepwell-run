@@ -843,7 +843,10 @@ def notify(kind):
             title = "Secrets scan finished"
             body = ("%d possible secret%s" % (n, "" if n == 1 else "s") if n else "No secrets found") + \
                 " in %d repositor%s." % (repos, "y" if repos == 1 else "ies")
-    env = {"PATH": "/usr/bin", "HOME": HOME}
+    env = {"PATH": "/usr/bin", "HOME": HOME,
+           # omarchy-shell finds the running shell through this; without it
+           # the refresh fails (quietly).
+           "OMARCHY_PATH": os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy", "LANG": "C.UTF-8"}
     env.update({k: os.environ[k] for k in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY") if k in os.environ})
     for argv in (["/usr/bin/notify-send", "--app-name=Keepwell", "--", _plain(title, 60), _plain(body, 160)],
                  ["/usr/bin/omarchy-shell", "-q", "keepwell", "refresh"]):
@@ -864,9 +867,12 @@ def stop(kind):
 
 def find_repos(root, limit=100, seconds=20.0):
     """Git repositories under root, at most four levels down, skipping
-    hidden folders and ones that only ever hold dependencies. Symlinked
-    folders are followed (~/Projects is often one), but each real folder is
-    visited once, so a link loop can't trap the walk."""
+    hidden folders and ones that only ever hold dependencies.
+
+    A symlinked folder is followed only when the folder it points to is
+    yours (~/Projects -> /mnt/data/Projects is; a link into /, /usr or
+    another account's files is not), and each real folder is visited once,
+    so a link loop can't trap the walk or carry it outside your files."""
     skip = {"node_modules", ".cache", "vendor", ".venv", "venv", "target", "build", "dist"}
     found, deadline, seen = [], time.monotonic() + seconds, set()
     stack = [(root, 0)]
@@ -893,7 +899,10 @@ def find_repos(root, limit=100, seconds=20.0):
             if e.name in skip or e.name.startswith("."):
                 continue
             try:
-                if e.is_dir(follow_symlinks=True):
+                if e.is_dir(follow_symlinks=False):
+                    stack.append((e.path, depth + 1))
+                elif e.is_symlink() and e.is_dir(follow_symlinks=True) \
+                        and os.stat(e.path).st_uid == os.geteuid():
                     stack.append((e.path, depth + 1))
             except OSError:
                 continue

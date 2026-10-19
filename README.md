@@ -228,9 +228,11 @@ systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
   (`zenity --file-selection --directory`, shown through the desktop portal)
   while Keepwell steps aside. Keepwell finds git repositories up to four
   levels down, skipping hidden folders and dependency folders such as
-  `node_modules`, at most 100. Symlinked folders are followed (`~/Projects`
-  is often one), but each real folder is visited once, so a link loop can't
-  trap the search. It runs
+  `node_modules`, at most 100, within 20 seconds. A symlinked folder is
+  followed only if the folder it points to is yours (`~/Projects` linking to
+  another drive is; a link into `/`, `/usr` or another account's files is
+  not), and each real folder is visited once, so a link loop can't trap the
+  search or carry it outside your files. It runs
   `gitleaks git --redact --report-format json --report-path - -- <repo>` on
   each in the `keepwell-gitleaks` service. Only locations are kept (see
   `gitleaks.json` above).
