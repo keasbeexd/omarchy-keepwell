@@ -466,8 +466,9 @@ def probe_traces():
 def probe_cleanup():
     p = {}
     if exists("/usr/bin/paccache"):
-        for key, keep in (("pkgCache", "3"), ("pkgCacheAll", "1")):
-            _, out = text(["/usr/bin/paccache", "-d", "-k", keep], timeout=10, cap=256 * 1024)
+        for key, flags in (("pkgCache", ["-k", "3"]), ("pkgCacheAll", ["-k", "1"]),
+                           ("pkgUninstalled", ["-u", "-k", "0"])):
+            _, out = text(["/usr/bin/paccache", "-d"] + flags, timeout=10, cap=256 * 1024)
             m = re.search(r"finished dry run: (\d+) candidates \(disk space saved: ([^)]+)\)", out)
             p[key] = {"count": int(m.group(1)), "bytes": size_from_human(m.group(2))} if m \
                 else {"count": 0, "bytes": 0}

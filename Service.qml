@@ -135,6 +135,7 @@ Scope {
   property bool confirmFailed: false
   property bool confirmSnapshot: false
   property string confirmContext: ""
+  property var confirmChosen: null    // option ids; null until the first plan
   property var pendingAct: null       // { act, checkId }
   property bool planDirty: false
 
@@ -146,6 +147,7 @@ Scope {
     if (action.run === "network") { say(""); check(true); return }
     if (action.launch) { launch(action.launch); return }
     if (action.act) { openConfirm(action.act, checkId, context); return }
+    if (action.trashSet) { openTrash(action.trashSet, action.label, context); return }
     say("“" + action.label + "” arrives in the next build.")
   }
 
@@ -160,6 +162,7 @@ Scope {
     pendingAct = { act: act, checkId: checkId }
     confirmContext = context
     confirmSnapshot = false
+    confirmChosen = null
     confirmOpen = true
     fetchPlan()
   }
@@ -169,15 +172,37 @@ Scope {
     confirmPlan = null
     confirmFailed = false
     if (planner.running) { planDirty = true; return }
-    var argv = python.concat([sourceDir + "/bin/keepwell-run", "plan", pendingAct.act])
-    if (confirmSnapshot) argv.push("--snapshot")
-    planner.start(argv)
+    planner.start(python.concat([sourceDir + "/bin/keepwell-run", "plan", pendingAct.act], runFlags()))
+  }
+
+  // The same flags for the plan and for the terminal, so they agree.
+  function runFlags() {
+    var flags = []
+    if (confirmSnapshot) flags.push("--snapshot")
+    if (confirmChosen !== null) flags.push("--with", confirmChosen.join(","))
+    return flags
+  }
+
+  function toggleOption(id) {
+    if (!confirmPlan || confirmChosen === null) return
+    var next = confirmChosen.slice()
+    var at = next.indexOf(id)
+    if (at === -1) next.push(id)
+    else next.splice(at, 1)
+    confirmChosen = next
+    fetchPlan()
   }
 
   function validPlan(p) {
     if (!p || !pendingAct || p.id !== pendingAct.act || typeof p.title !== "string"
-        || typeof p.summary !== "string" || !Array.isArray(p.steps) || p.steps.length === 0
-        || p.steps.length > 20) return false
+        || typeof p.summary !== "string" || !Array.isArray(p.steps) || p.steps.length > 20
+        || !Array.isArray(p.options) || p.options.length > 20) return false
+    if (p.steps.length === 0 && p.options.length === 0) return false
+    for (var j = 0; j < p.options.length; j++) {
+      var o = p.options[j]
+      if (!o || !/^[a-z0-9]{1,24}$/.test(o.id) || typeof o.label !== "string"
+          || typeof o.hint !== "string" || typeof o.checked !== "boolean") return false
+    }
     for (var i = 0; i < p.steps.length; i++) {
       var s = p.steps[i]
       if (!s || typeof s.say !== "string" || typeof s.cmd !== "string" || s.cmd.length > 2000) return false
@@ -193,8 +218,12 @@ Scope {
       if (root.planDirty) { root.planDirty = false; root.fetchPlan(); return }
       var p = null
       if (ok) { try { p = JSON.parse(text) } catch (e) { p = null } }
-      if (root.validPlan(p)) root.confirmPlan = p
-      else root.confirmFailed = true
+      if (root.validPlan(p)) {
+        // The first plan says which options start ticked.
+        if (root.confirmChosen === null)
+          root.confirmChosen = p.options.filter(function(o) { return o.checked }).map(function(o) { return o.id })
+        root.confirmPlan = p
+      } else root.confirmFailed = true
     }
   }
 
@@ -209,17 +238,93 @@ Scope {
     pendingAct = null
   }
 
+  // ---------------- moving things to Trash ----------------
+  // No root and no terminal: the sheet lists every item with its size, and
+  // what you tick goes to Trash, where it can be restored.
+  property bool trashOpen: false
+  property string trashSet: ""
+  property string trashTitle: ""
+  property string trashContext: ""
+  property var trashItems: null
+  property bool trashFailed: false
+  property var trashChecked: ({})
+
+  function openTrash(set, label, context) {
+    if (lister.running || trasher.running) return
+    trashSet = set
+    trashTitle = set === "cache" ? "Clear app caches" : "Clear activity traces"
+    trashContext = context
+    trashItems = null
+    trashFailed = false
+    trashChecked = ({})
+    trashOpen = true
+    lister.start(python.concat([sourceDir + "/bin/keepwell-run", "list", set]))
+  }
+
+  function toggleTrashItem(id) {
+    var next = {}
+    for (var k in trashChecked) next[k] = trashChecked[k]
+    next[id] = !next[id]
+    trashChecked = next
+  }
+
+  function confirmTrash() {
+    var ids = (trashItems || []).filter(function(i) { return root.trashChecked[i.id] === true })
+                                .map(function(i) { return i.id })
+    if (ids.length === 0 || trasher.running) return
+    trasher.start(python.concat([sourceDir + "/bin/keepwell-run", "trash", trashSet], ids))
+  }
+
+  function cancelTrash() { if (!trasher.running) trashOpen = false }
+
+  BoundedProcess {
+    id: lister
+    maxBytes: 64 * 1024
+    timeoutMs: 15000
+    onFinished: function(ok, text) {
+      var d = null
+      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
+      var valid = d && d.set === root.trashSet && Array.isArray(d.items) && d.items.length <= 60
+        && d.items.every(function(i) {
+          return i && typeof i.id === "string" && i.id.length <= 128 && typeof i.label === "string"
+            && typeof i.path === "string" && typeof i.bytes === "number" && isFinite(i.bytes)
+        })
+      if (valid) root.trashItems = d.items
+      else root.trashFailed = true
+    }
+  }
+
+  BoundedProcess {
+    id: trasher
+    maxBytes: 64 * 1024
+    timeoutMs: 120000
+    onFinished: function(ok, text) {
+      var d = null
+      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
+      root.trashOpen = false
+      if (!d || !Array.isArray(d.trashed) || !Array.isArray(d.failed)) {
+        root.say("Something went wrong; check the Trash to see what moved.")
+      } else {
+        var bytes = (root.trashItems || []).filter(function(i) { return d.trashed.indexOf(i.id) !== -1 })
+                                           .reduce(function(n, i) { return n + i.bytes }, 0)
+        root.say(d.trashed.length ? "Moved " + d.trashed.length + " to Trash (" + Present.bytes(bytes)
+                   + "). Empty the Trash to free the space." + (d.failed.length ? " " + d.failed.length + " couldn't be moved." : "")
+                 : "Nothing could be moved.")
+      }
+      root.check(false)
+    }
+  }
+
   // ---------------- the terminal round trip ----------------
   // { title, act, checkId, toplevel, network }
   property var terminal: null
 
   function acceptConfirm() {
-    if (!confirmPlan || !pendingAct || terminal) return
+    if (!confirmPlan || !pendingAct || terminal || confirmPlan.steps.length === 0) return
     var title = "Keepwell · " + confirmPlan.title
     var argv = ["/usr/bin/uwsm-app", "--", "/usr/bin/xdg-terminal-exec",
                 "--app-id=org.omarchy.terminal", "--title=" + title, "-e"]
-      .concat(python, [sourceDir + "/bin/keepwell-run", "apply", pendingAct.act])
-    if (confirmSnapshot) argv.push("--snapshot")
+      .concat(python, [sourceDir + "/bin/keepwell-run", "apply", pendingAct.act], runFlags())
     terminal = { title: title, act: pendingAct.act, checkId: pendingAct.checkId, toplevel: null,
                  network: pendingAct.act === "install-arch-audit" || pendingAct.act === "update" }
     confirmOpen = false
@@ -322,6 +427,17 @@ Scope {
       item.confirmAccepted.connect(root.acceptConfirm)
       item.confirmCanceled.connect(root.cancelConfirm)
       item.confirmSnapshotToggled.connect(root.toggleSnapshot)
+      item.confirmOptionToggled.connect(root.toggleOption)
+      item.trashOpen = Qt.binding(function() { return root.trashOpen })
+      item.trashTitle = Qt.binding(function() { return root.trashTitle })
+      item.trashContext = Qt.binding(function() { return root.trashContext })
+      item.trashItems = Qt.binding(function() { return root.trashItems })
+      item.trashFailed = Qt.binding(function() { return root.trashFailed })
+      item.trashBusy = Qt.binding(function() { return trasher.running })
+      item.trashChecked = Qt.binding(function() { return root.trashChecked })
+      item.trashToggled.connect(root.toggleTrashItem)
+      item.trashAccepted.connect(root.confirmTrash)
+      item.trashCanceled.connect(root.cancelTrash)
       item.show()
     }
   }

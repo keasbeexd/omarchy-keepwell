@@ -348,7 +348,7 @@ function traces(p) {
       fact("Shell history", p.historyLines === null ? "None" : plural(p.historyLines, "line", "lines")),
       fact("Thumbnails", bytes(p.thumbnailBytes) + (p.thumbnailsComplete ? "" : "+"))
     ],
-    actions: [{ label: "Choose what to clear…", primary: true, trash: true }] })
+    actions: [{ label: "Choose what to clear…", primary: true, trash: true, trashSet: "traces" }] })
 }
 
 function permissions(p) {
@@ -371,20 +371,23 @@ function cleanup(p) {
   var b = CATALOG.clean
   var safe = (p.pkgCache ? p.pkgCache.bytes || 0 : 0)
   var extraPkgs = p.pkgCacheAll ? Math.max(0, (p.pkgCacheAll.bytes || 0) - safe) : 0
+  var removed = p.pkgUninstalled ? p.pkgUninstalled.bytes || 0 : 0
   var orphans = p.orphans || { count: 0, bytes: 0 }
   var home = p.homeCache || { bytes: 0, complete: true }
-  var total = safe + extraPkgs + (orphans.bytes || 0) + (home.bytes || 0)
+  var total = safe + extraPkgs + removed + (orphans.bytes || 0) + (home.bytes || 0)
   return check(b, { kind: "info",
     status: total > 0 ? "Up to " + bytes(total) + " can be freed" : "Nothing to clean up",
-    meta: "App cache " + bytes(home.bytes) + " · package cache " + bytes(safe + extraPkgs) + " · logs " + bytes(p.journalBytes),
+    meta: "App cache " + bytes(home.bytes) + " · package cache " + bytes(safe + extraPkgs + removed) + " · logs " + bytes(p.journalBytes),
     facts: [
       fact("Old package versions", bytes(safe), "Safe · keeps 3"),
+      fact("Removed packages' downloads", bytes(removed), "Safe"),
       fact("All but newest", bytes(extraPkgs), "Advanced · keeps 1"),
       fact("Unused packages", orphans.count ? plural(orphans.count, "package", "packages") + " · " + bytes(orphans.bytes) : "None", "Advanced"),
       fact("App cache", bytes(home.bytes) + (home.complete ? "" : "+"), "Review each"),
       fact("System logs", bytes(p.journalBytes), "journal")
     ],
-    actions: [{ label: "Review cleanup…", primary: true }] })
+    actions: [{ label: "Review cleanup…", primary: true, elevated: true, act: "cleanup" },
+              { label: "Review app cache…", trash: true, trashSet: "cache" }] })
 }
 
 function unclaimed() {

@@ -9,9 +9,9 @@ arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language an
 hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
 > **Status: 0.3.0.** Every check reads your real system. Installs, firewall,
-> updates and snapshots work through a visible terminal (below). Cleanup and
-> the privacy settings are shown and arrive in the next builds (pressing one
-> says so).
+> updates, snapshots and cleanup work through a visible terminal, and caches
+> and activity traces move to Trash (below). The privacy settings are shown
+> and arrive in the next build (pressing one says so).
 
 ## What it looks like
 
@@ -111,8 +111,9 @@ the window. Nothing else in Keepwell makes a network request.
 
 ### What it writes
 
-Nothing by itself: Keepwell creates no files. Changes to your system happen
-only through the actions below, in a terminal, after you confirm.
+Keepwell creates no files of its own. Changes happen only through the
+actions below: in a terminal after you confirm, or by moving what you tick
+to the Trash.
 
 ## Actions
 
@@ -145,6 +146,21 @@ script, `bin/keepwell-run`, in three steps:
 | Turn off the firewall | `sudo ufw disable` |
 | Update the system | `omarchy update` |
 | Take a snapshot | `omarchy snapshot create` |
+| Clean up (you tick which) | `sudo paccache -r -k 3` (old versions, or `-k 1` for all but the newest), `sudo paccache -r -u -k 0` (downloads of removed packages), `sudo pacman -Rns -- <unused packages, listed>`, `sudo journalctl --vacuum-time=2weeks` |
+
+The cleanup sheet measures each option first (`paccache -d`, `pacman -Qtdq`,
+`journalctl --disk-usage`) and ticks only the safe ones; the commands update
+as you tick, and the terminal runs exactly the ticked set.
+
+### Moving things to Trash
+
+App caches (folders directly inside `~/.cache`) and activity traces (the
+recent-files list, `~/.bash_history`, `~/.cache/thumbnails`) are cleared
+without root or a terminal. A sheet lists every item with its size, nothing
+ticked; what you tick is moved with `gio trash`, one item at a time, so it
+can be restored from the Trash. The space is freed when you empty the Trash.
+Items are named by id, never by path: a cache item must be a plain name
+directly inside `~/.cache` that you own, and traces come from a fixed list.
 
 Opening an app (GufW, Flatseal, Disk Usage Analyzer, VS Code) runs
 `uwsm-app -- <app>.desktop` and closes Keepwell.
