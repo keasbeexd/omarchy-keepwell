@@ -964,6 +964,7 @@ def probe_outside(network):
             except (OSError, ValueError):
                 pass
     p["notInAur"] = [clean(n, 64) for n in foreign if n in missing][:30]
+    p["inAur"] = [clean(n, 64) for n in foreign if n in checked and n not in missing][:30]
     p["unchecked"] = len([n for n in foreign if n not in checked])
     p["aurAt"] = at
     p["hand"] = _hand_installed()

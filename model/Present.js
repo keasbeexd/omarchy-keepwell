@@ -280,18 +280,20 @@ function outside(p, perms, now) {
     facts.push(fact(h.name, h.shadows ? "Hides the packaged " + h.name + " in /usr/bin — you may be running an old copy"
       : h.appimage ? "AppImage — update it from where you downloaded it" : "Program copied in by hand — nothing updates it", h.where))
   })
-  notInAur.forEach(function(n) { facts.push(fact(n, "Not in the AUR any more — yay can't update it", "built yourself")) })
+  notInAur.forEach(function(n) { facts.push(fact(n, "Not in the AUR any more — omarchy update can't update it", "built yourself")) })
   tools.forEach(function(t) { facts.push(fact(t[0], t[1].join(", "), "update with " + t[0].split(" ")[0])) })
   if (flatpaks) facts.push(fact("Flatpak", plural(flatpaks, "app", "apps"), "update with flatpak update"))
   var aur = p.foreign > 0 ? (p.aurAt ? "AUR checked " + ago(p.aurAt, now) + (p.refreshFailed ? " (couldn't reach it this time)" : "")
     : "AUR not checked yet — Refresh asks it") : ""
   var count = facts.length
-  var covered = (p.foreign || 0) - notInAur.length
-  if (covered > 0) facts.push(fact("AUR packages", covered + " still in the AUR — yay updates " + (covered === 1 ? "it" : "them"), aur))
+  var inAur = list(p.inAur)
+  if (inAur.length) facts.push(fact(plural(inAur.length, "AUR package", "AUR packages"), inAur.join(", "),
+    "omarchy update keeps " + (inAur.length === 1 ? "it" : "these") + " updated · " + aur))
+  else if (p.foreign > 0 && !p.aurAt) facts.push(fact("AUR packages", plural(p.foreign, "package", "packages") + " from outside the official repositories", aur))
   var actions = flatpaks ? [{ label: "Update Flatpak apps…", primary: true, act: "flatpak-update" }] : []
   var shadows = hand.filter(function(h) { return h.shadows })
   if (!count) return check(b, { kind: "good", status: "omarchy update covers everything",
-    meta: p.foreign ? plural(p.foreign, "AUR package", "AUR packages") + ", all still in the AUR" : "Packages and mise tools only",
+    meta: inAur.length ? "Packages, " + plural(inAur.length, "AUR package", "AUR packages") + " and mise tools" : "Packages and mise tools",
     facts: facts })
   return check(b, { kind: shadows.length ? "attn" : "info",
     status: shadows.length ? shadows[0].name + " in " + shadows[0].where + " hides the packaged one"
