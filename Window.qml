@@ -350,6 +350,7 @@ Item {
                   check: root.check
                   cursorAction: root.actionCursor
                   onActionActivated: function(index) { root.activateAction(index) }
+                  onLinkActivated: function(url) { root.actionRequested({ url: url }, root.check.id || "", "") }
                 }
               }
             }

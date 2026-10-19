@@ -11,6 +11,7 @@ Rectangle {
   property int cursorAction: -1
 
   signal actionActivated(int index)
+  signal linkActivated(string url)
 
   readonly property string kind: check.kind || "off"
   readonly property var actions: check.actions || []
@@ -133,11 +134,12 @@ Rectangle {
                 width: parent.width
                 text: modelData.v
                 wrapMode: Text.WordWrap
+                font.underline: !!modelData.url && rowMouse.containsMouse
               }
               KText {
-                visible: !!modelData.owner
+                visible: !!modelData.owner || !!modelData.url
                 width: parent.width
-                text: modelData.owner || ""
+                text: (modelData.owner || "") + (modelData.url ? (modelData.owner ? " · " : "") + "details ↗" : "")
                 font.pixelSize: Tokens.caption
                 color: Tokens.fg3
                 wrapMode: Text.WordWrap
@@ -148,6 +150,14 @@ Rectangle {
               width: parent.width
               height: 1
               color: Tokens.line
+            }
+            MouseArea {
+              id: rowMouse
+              anchors.fill: parent
+              enabled: !!modelData.url
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.linkActivated(modelData.url)
             }
           }
         }
