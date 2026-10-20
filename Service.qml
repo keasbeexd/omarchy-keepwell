@@ -130,11 +130,15 @@ Scope {
         root.say(root.reportAfterCheck.prefix + (c ? c.title + ": " + c.status + "." : ""))
         root.reportAfterCheck = null
       }
+      if (!root.failed && root.scanNotice && !root.queued) root.endScanNotice()
+      // The queued run starts on the next turn of the event loop: inside
+      // onFinished the process still counts as running, and check() would
+      // only queue it again, leaving it to wait for some later request.
       if (root.queued) {
         var net = root.queuedNetwork
         root.queued = false
         root.queuedNetwork = false
-        root.check(net)
+        Qt.callLater(root.check, net)
       }
     }
   }
@@ -687,9 +691,27 @@ Scope {
   function startJob(args, started) {
     if (jobber.running) return
     jobMessage = started
+    jobKind = args[0]
     jobber.start(python.concat([sourceDir + "/bin/keepwell-run"], args))
   }
   property string jobMessage: ""
+  property string jobKind: ""
+
+  // A background scan's "you'll get a notification" stays in the footer
+  // until a check shows that scan has ended; then the footer says what it found.
+  property var scanNotice: null       // { checkId, flag } while one is running
+  readonly property var scanKinds: ({
+    scan: { checkId: "av", probe: "antivirus", flag: "scanning" },
+    leaks: { checkId: "leaks", probe: "tools", flag: "leaksScanning" },
+    osv: { checkId: "deps", probe: "tools", flag: "osvScanning" }
+  })
+  function endScanNotice() {
+    var probe = doc && doc.probes ? doc.probes[scanNotice.probe] : null
+    if (!probe || probe[scanNotice.flag] === true) return
+    var c = findCheck(scanNotice.checkId)
+    scanNotice = null
+    say(c ? "Scan finished — " + c.title + ": " + c.status + "." : "Scan finished.")
+  }
 
   BoundedProcess {
     id: jobber
@@ -703,6 +725,7 @@ Scope {
                  ? "That folder can't be scanned." : "Couldn't start the scan.")
       else if (!d) root.say("Something went wrong starting that.")
       else if (root.jobMessage !== "") root.say(root.jobMessage)
+      root.scanNotice = d && d.started === true ? root.scanKinds[root.jobKind] || null : null
       root.check(false)
     }
   }

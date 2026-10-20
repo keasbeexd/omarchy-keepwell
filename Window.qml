@@ -457,25 +457,35 @@ Item {
           // ---------------- footer ----------------
           Rectangle { Layout.fillWidth: true; height: 1; color: Tokens.line }
           RowLayout {
+            id: footerRow
             Layout.fillWidth: true
             Layout.margins: Tokens.sp(8)
             Layout.leftMargin: Tokens.sp(18)
             Layout.rightMargin: Tokens.sp(18)
             spacing: Tokens.sp(18)
 
-            Repeater {
-              model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["R", "refresh"], ["S", "schedule"]]
-                .concat(root.schedules.missed && root.schedules.missed.length ? [["M", "run missed"], ["D", "dismiss"]] : [])
-                .concat([["Esc", "close"]])
-              delegate: Row {
-                required property var modelData
-                spacing: Tokens.sp(6)
-                KText { text: modelData[0]; font.pixelSize: Tokens.caption; font.bold: true; color: Tokens.fg2 }
-                KText { text: modelData[1]; font.pixelSize: Tokens.caption; color: Tokens.fg3 }
+            // On a narrow screen the key hints make way for a notice.
+            Row {
+              id: hints
+              spacing: Tokens.sp(18)
+              visible: root.notice === "" || footerRow.width >= hints.implicitWidth + noticeText.implicitWidth + Tokens.sp(36)
+              Repeater {
+                model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["R", "refresh"], ["S", "schedule"]]
+                  .concat(root.schedules.missed && root.schedules.missed.length ? [["M", "run missed"], ["D", "dismiss"]] : [])
+                  .concat([["Esc", "close"]])
+                delegate: Row {
+                  required property var modelData
+                  spacing: Tokens.sp(6)
+                  KText { text: modelData[0]; font.pixelSize: Tokens.caption; font.bold: true; color: Tokens.fg2 }
+                  KText { text: modelData[1]; font.pixelSize: Tokens.caption; color: Tokens.fg3 }
+                }
               }
             }
             Item { Layout.fillWidth: true }
             KText {
+              id: noticeText
+              Layout.maximumWidth: footerRow.width
+              elide: Text.ElideRight
               text: root.notice
               font.pixelSize: Tokens.caption
               color: root.notice !== "" ? Tokens.fg2 : Tokens.fg3
