@@ -17,6 +17,7 @@
     keepwell-run alert <id:kind|text>...      notify once for each newly flagged check
     keepwell-run unclaimed days <n> | ignore <id>... | unignore
                                               the unclaimed finder's settings
+    keepwell-run virus allow <id> | forget    mark a flagged file as not a threat; undo all
     keepwell-run scan  downloads|home         start a ClamAV scan in the background
     keepwell-run leaks <folder>               start a gitleaks scan in the background
     keepwell-run osv <folder>                 start an osv-scanner scan in the background
@@ -60,6 +61,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import keepwell_state  # noqa: E402
+import keepwell_av  # noqa: E402
 import keepwell_unclaimed  # noqa: E402
 import keepwell_schedule  # noqa: E402
 
@@ -1065,6 +1067,14 @@ def _plain(text_value, limit):
     return text_value[:limit]
 
 
+def _infected(log):
+    """Infected files in a finished scan log, less those marked as not a
+    threat whose contents haven't changed."""
+    bad = re.search(r"(?m)^Infected files: (\d+)$", log)
+    n = int(bad.group(1)) if bad else 0
+    return max(0, n - len(keepwell_av.split(keepwell_av.findings(log))[1]))
+
+
 def notify(kind, quiet=False):
     if quiet:
         _refresh()
@@ -1077,9 +1087,8 @@ def notify(kind, quiet=False):
             title, body = "Virus scan stopped", where + ": stopped before the end."
         else:
             files = re.search(r"(?m)^Scanned files: (\d+)$", log)
-            bad = re.search(r"(?m)^Infected files: (\d+)$", log)
             secs = re.search(r"(?m)^Time: ([0-9.]+) sec", log)
-            n = int(bad.group(1)) if bad else 0
+            n = _infected(log)
             took = (" in %d min" % round(float(secs.group(1)) / 60)) if secs and float(secs.group(1)) >= 90 \
                 else (" in %d s" % round(float(secs.group(1)))) if secs else ""
             title = "Virus scan finished"
@@ -1302,8 +1311,7 @@ def _deep_summary(parts, started, skipped):
         elif "----------- SCAN SUMMARY -----------" not in log:
             said.append("virus scan of %s stopped before the end" % where)
         else:
-            bad = re.search(r"(?m)^Infected files: (\d+)$", log)
-            n = int(bad.group(1)) if bad else 0
+            n = _infected(log)
             said.append("virus scan of %s: %s" % (where, "%d infected file%s" % (n, "" if n == 1 else "s") if n else "nothing found"))
     for name, label, key in (("leaks", "secrets", "gitleaks.json"), ("osv", "dependencies", "osv.json")):
         if name not in parts:
@@ -1528,6 +1536,9 @@ def resolve(which, item):
     the finder's candidates right now."""
     if which == "unclaimed":
         return keepwell_unclaimed.resolve(item)
+    if which == "virus":
+        found = _virus_found().get(item)
+        return found[0] if found else None
     if which == "traces":
         entry = TRACES.get(item)
         return entry[1] if entry and _owned(entry[1]) else None
@@ -1539,6 +1550,20 @@ def resolve(which, item):
     return None
 
 
+def _virus_found():
+    """{id: (path, signature)} for each file the newest scan flagged that
+    isn't marked as not a threat and is still a file you own in your home."""
+    latest = keepwell_state.latest_log()
+    if not latest or latest[1] is None:
+        return {}
+    shown, _ = keepwell_av.split(keepwell_av.findings(latest[1].decode("utf-8", "replace")))
+    out = {}
+    for path, sig in shown:
+        if os.path.realpath(path) == path and path.startswith(HOME + "/") and _owned(path):
+            out[keepwell_av.item_id(path)] = (path, sig)
+    return out
+
+
 def list_items(which):
     budget = [400000, time.monotonic() + 8]
     items = []
@@ -1548,6 +1573,12 @@ def list_items(which):
                 "ignored": found["ignored"], "looked": found["looked"],
                 "items": [{"id": c["id"], "label": c["id"].split("/")[-1], "path": c["path"],
                            "bytes": c["bytes"], "complete": True, "days": c["days"]} for c in found["items"]]}
+    if which == "virus":
+        for key, (path, sig) in list(_virus_found().items())[:40]:
+            st = _owned(path)
+            items.append({"id": key, "label": os.path.basename(path) + " — " + sig[:80],
+                          "path": path.replace(HOME, "~", 1), "bytes": st.st_size if st else 0, "complete": True})
+        return {"set": which, "items": items}
     if which == "traces":
         for key, (label, path) in TRACES.items():
             if resolve("traces", key):
@@ -1603,7 +1634,15 @@ def main():
             return 2
         sys.stdout.write(json.dumps({"saved": True}))
         return 0
-    if len(args) >= 2 and args[0] in ("list", "trash") and args[1] in ("cache", "traces", "unclaimed"):
+    if len(args) == 3 and args[:2] == ["virus", "allow"] and re.fullmatch(r"[0-9a-f]{16}", args[2]):
+        found = _virus_found().get(args[2])
+        sys.stdout.write(json.dumps({"saved": bool(found) and keepwell_av.allow(*found)}))
+        return 0
+    if args == ["virus", "forget"]:
+        keepwell_av.forget_all()
+        sys.stdout.write(json.dumps({"saved": True}))
+        return 0
+    if len(args) >= 2 and args[0] in ("list", "trash") and args[1] in ("cache", "traces", "unclaimed", "virus"):
         if args[0] == "list" and len(args) == 2:
             sys.stdout.write(json.dumps(list_items(args[1]), separators=(",", ":")))
             return 0

@@ -109,7 +109,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Firewall | `/etc/ufw/ufw.conf`, `/etc/default/ufw`, `/etc/ufw/user*.rules` | `systemctl is-enabled/is-active ufw` |
 | Remote access | `/etc/ssh/sshd_config` and its `Include`d drop-ins (port, password and root login settings), `/etc/ufw/user*.rules` (whether the SSH port is allowed); the number of keys in `~/.ssh/authorized_keys` | `systemctl is-enabled/is-active sshd.service sshd.socket` |
 | Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (hourly and when you ask — see Network); `busctl get-property … NetworkManager Metered` |
-| Antivirus | modification times in `/var/lib/clamav`; the newest of Keepwell's scan logs | `systemctl is-enabled/is-active clamav-freshclam`, `systemctl --user is-active keepwell-clamscan`, `crontab -l` |
+| Antivirus | modification times in `/var/lib/clamav`; the newest of Keepwell's scan logs; the files you marked as not a threat (`av-allowed.json`), each hashed again to check it hasn't changed | `systemctl is-enabled/is-active clamav-freshclam`, `systemctl --user is-active keepwell-clamscan`, `crontab -l` |
 | Secrets in your code | the last scan summary (`gitleaks.json`) | `systemctl --user is-active keepwell-gitleaks` |
 | Dependency vulnerabilities | the last scan summary (`osv.json`) | `systemctl --user is-active keepwell-osv` |
 | System updates | the last 1 MiB of `/var/log/pacman.log` | — |
@@ -178,6 +178,7 @@ at 0600, written through a fresh temporary file and a rename.
 | `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files |
 | `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
 | `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
+| `av-allowed.json` | files the virus scan flagged that you marked as not a threat: each one's path, SHA-256 and the signature it matched |
 | `schedules.json` | your deep-scan schedule: days, time, which scans, the battery rule (kept when you turn it off, so turning it on again starts from there) |
 | `runs.json` | the last deep-scan run's time and one-line summary, and which missed run you were told about or dismissed |
 | `aur.json` | the last AUR answer: when it was asked, which foreign package names were checked, and which the AUR no longer has |
@@ -273,6 +274,13 @@ systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
 - **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~` but
   skips `~/.cache`, `~/.local/share/Trash` and Keepwell's own logs. A home
   scan can take half an hour or more.
+- **Review found files…** lists what the last scan flagged. Tick a file to
+  move it to the Trash, or mark it **Not a threat**: games and Wine ship
+  Windows DLLs that sometimes match ClamAV's Windows signatures (DXVK is a
+  known case). A marked file is still scanned, but Keepwell leaves it out of
+  the check and the notification for as long as its SHA-256 is unchanged; if
+  the file is replaced, it shows again. **Stop ignoring** on the check
+  clears the list.
 - **Scan home folder** (Secrets in your code) looks through your home
   folder; **Choose another folder…** opens a folder picker
   (`zenity --file-selection --directory`, shown through the desktop portal)
@@ -373,7 +381,9 @@ without root or a terminal. A sheet lists every item with its size, nothing
 ticked; what you tick is moved with `gio trash`, one item at a time, so it
 can be restored from the Trash. The space is freed when you empty the Trash.
 Items are named by id, never by path: a cache item must be a plain name
-directly inside `~/.cache` that you own, and traces come from a fixed list.
+directly inside `~/.cache` that you own, traces come from a fixed list, and
+a flagged file must still be named in the newest scan log and be a file you
+own inside your home.
 
 Opening an app (GufW, Flatseal, Disk Usage Analyzer, VS Code) runs
 `uwsm-app -- <app>.desktop` and closes Keepwell.

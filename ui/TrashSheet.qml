@@ -8,12 +8,14 @@ import "../model/Present.js" as Present
 //
 // The heading and the buttons stay put; only the list scrolls, and it
 // follows the keyboard cursor. For unclaimed folders the sheet also shows
-// how long each has been untouched, an age choice, and "Ignore" per row.
+// how long each has been untouched, an age choice, and "Ignore" per row; for
+// files the virus scan flagged, "Not a threat" per row.
 Item {
   id: root
 
   property bool opened: false
   property string title: ""
+  property string set: ""
   property string context: ""
   property var items: null          // [{ id, label, path, bytes, complete, days? }] or null while loading
   property bool failed: false
@@ -31,6 +33,8 @@ Item {
 
   readonly property var list: items || []
   readonly property bool unclaimed: dayChoices.length > 0
+  readonly property bool virus: set === "virus"
+  readonly property bool canIgnore: unclaimed || virus
   readonly property var chosen: list.filter(function(i) { return root.checked[i.id] === true })
   readonly property real chosenBytes: chosen.reduce(function(n, i) { return n + (i.bytes || 0) }, 0)
   readonly property bool allChecked: list.length > 0 && chosen.length === list.length
@@ -118,8 +122,10 @@ Item {
           Layout.fillWidth: true
           text: root.failed ? "Couldn't list these right now. Nothing was moved."
             : root.items === null ? "Looking…"
-            : root.list.length === 0 ? (root.unclaimed ? "No unclaimed folder has been untouched that long." : "There is nothing here to clear.")
+            : root.list.length === 0 ? (root.unclaimed ? "No unclaimed folder has been untouched that long."
+              : root.virus ? "Nothing left to review." : "There is nothing here to clear.")
             : root.unclaimed ? "Nothing installed uses these, and nothing in them has changed for a long time. Check each one before ticking it — a folder can still hold something you want."
+            : root.virus ? "ClamAV matched these against known malware. Tick what you don't recognise to move it to the Trash. If you know where a file came from (a game's DLL, a Wine or Proton file), it may be a false alarm."
             : "Tick what to move to Trash. Apps rebuild their caches when they need them, which can make them a little slower the first time."
           color: Tokens.fg2
           wrapMode: Text.WordWrap
@@ -231,9 +237,9 @@ Item {
                   color: Tokens.fg2
                 }
                 ActionButton {
-                  visible: root.unclaimed
+                  visible: root.canIgnore
                   anchors.verticalCenter: parent.verticalCenter
-                  label: "Ignore"
+                  label: root.virus ? "Not a threat" : "Ignore"
                   enabledAction: !root.busy
                   onActivated: root.ignored(modelData.id)
                 }
@@ -249,6 +255,8 @@ Item {
         visible: root.list.length > 0
         text: root.unclaimed
           ? "Ignore never suggests a folder again (undo on the check). Moved items stay in the Trash, where you can restore them; their space is freed when you empty it."
+          : root.virus
+          ? "Not a threat hides the file until its contents change (undo on the check). The Trash isn't scanned; files moved there can be restored."
           : "Moved items stay in the Trash, where you can restore them. Their space is freed when you empty the Trash."
         font.pixelSize: Tokens.small
         color: Tokens.fg3
@@ -283,7 +291,8 @@ Item {
 
   // Up/Down walk the age choice, "Select all", the rows and then the
   // buttons; Left/Right change the age while it has the cursor; Tab jumps
-  // to the buttons and back; I ignores the row under the cursor.
+  // to the buttons and back; I ignores the row under the cursor (marks it as
+  // not a threat, for the virus scan's files).
   function handleKey(event) {
     if (root.busy) return true
     var k = event.key
@@ -296,7 +305,7 @@ Item {
     else if (k === Qt.Key_Tab) root.cursor = root.cursor < root.cancelIndex ? root.confirmIndex : 0
     else if (k === Qt.Key_Backtab) root.cursor = root.cursor < root.cancelIndex ? root.cancelIndex : 0
     else if (k === Qt.Key_A && (event.modifiers & Qt.ControlModifier)) root.allToggled()
-    else if (k === Qt.Key_I && root.unclaimed && onRow) root.ignored(root.list[root.cursor - root.firstRow].id)
+    else if (k === Qt.Key_I && root.canIgnore && onRow) root.ignored(root.list[root.cursor - root.firstRow].id)
     else if (k === Qt.Key_Space || k === Qt.Key_Return || k === Qt.Key_Enter) {
       if (root.cursor === root.allIndex) root.allToggled()
       else if (onRow) root.toggled(root.list[root.cursor - root.firstRow].id)

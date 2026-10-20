@@ -214,14 +214,18 @@ function antivirus(p, now) {
         + (last.infected ? plural(last.infected, "infected file", "infected files") : "nothing found"))])
   var found = last && last.finished && last.infected ? last.found || [] : []
   for (var i = 0; i < found.length; i++) facts.push(fact(i === 0 ? "Found" : "", found[i]))
+  if (p.allowed) facts.push(fact("Not a threat", plural(p.allowed, "file", "files")
+    + (last && last.allowedFound ? " · " + last.allowedFound + " flagged again, hidden" : ""), "marked by you"))
   var stale = age === null || age > 7
   var actions = []
+  if (found.length && !p.scanning) actions.push({ label: "Review found files…", primary: true, trash: true, trashSet: "virus" })
   if (p.scanning) actions.push({ label: "Stop scan", primary: true, stop: "clamscan" })
   else if (age !== null) {
-    actions.push({ label: "Scan Downloads", primary: !stale || auto, scan: "downloads" })
+    actions.push({ label: "Scan Downloads", primary: !found.length && (!stale || auto), scan: "downloads" })
     actions.push({ label: "Scan home folder", scan: "home" })
   }
-  if (!auto) actions.push({ label: "Turn on auto-update", primary: !p.scanning, elevated: true, act: "freshclam-on" })
+  if (!auto) actions.push({ label: "Turn on auto-update", primary: !p.scanning && !found.length, elevated: true, act: "freshclam-on" })
+  if (p.allowed) actions.push({ label: "Stop ignoring " + plural(p.allowed, "file", "files"), unignore: "virus" })
   return check(b, {
     kind: found.length ? "crit" : stale ? "attn" : "good",
     status: p.scanning ? "Scanning in the background…"
@@ -230,7 +234,7 @@ function antivirus(p, now) {
     meta: p.scanning ? "You'll get a notification when it's done" : last ? "Scanned " + ago(last.at, now) + " · " + where(last.target) : "No scans yet",
     facts: facts,
     note: found.length
-      ? "Keepwell doesn't delete anything. Check each file: if you don't recognise it, move it to the Trash yourself; if you do, it may be a false alarm."
+      ? "Check each file. If you don't recognise it, move it to the Trash. If you do (a game's DLL, a Wine or Proton file), it may be a false alarm: mark it as not a threat and it stays hidden until its contents change."
       : "Scans run in the background at low priority and skip caches and the Trash. A home-folder scan can take half an hour or more. " + honest,
     actions: actions })
 }
