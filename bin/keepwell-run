@@ -894,18 +894,82 @@ def _background(unit, kind, argv, quiet=False):
     return {"started": rc == 0}
 
 
+# Caches, the Trash and Keepwell's own logs: rebuilt, already discarded, or
+# written by the scan itself.
+CLAM_SKIP = (".cache", ".local/share/Trash", ".local/state/keepwell")
+
+
 def start_scan(target, quiet=False):
     if not _trusted("/usr/bin/clamscan"):
         return {"started": False, "reason": "missing"}
+    me = os.path.realpath(__file__)
+    return _background(UNITS["clamscan"], "clamscan", ["/usr/bin/python3", "-I", "-S", me, "clam-scan", target], quiet)
+
+
+def _progress(kind, started, done, total):
+    """How far a background scan has got, for the window. A write that fails
+    (disk full) leaves the last one in place; the scan itself goes on."""
+    try:
+        keepwell_state.write("progress-%s.json" % kind, json.dumps(
+            {"started": started, "done": done, "total": total}).encode())
+    except OSError:
+        pass
+
+
+def _count_files(root, skip, seconds=30.0):
+    """Regular files under root that clamscan will reach (it follows no
+    symlinks below the folder it's given), or None if counting takes too
+    long."""
+    n, stack, deadline = 0, [root], time.monotonic() + seconds
+    while stack:
+        if time.monotonic() > deadline:
+            return None
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            if e.path not in skip:
+                                stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            n += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return n
+
+
+def clam_scan(target):
+    """Runs inside the background unit. Counts the files first, then runs
+    clamscan --verbose and counts its "Scanning <file>" lines as it goes.
+    Those lines are left out of the log, which keeps only what --log would
+    have: the files found and the summary."""
     path = os.path.join(HOME, "Downloads") if target == "downloads" else HOME
+    skip = [os.path.join(HOME, sub) for sub in CLAM_SKIP] if target == "home" else []
+    started = int(time.time())
+    _progress("clamscan", started, 0, None)
+    total = _count_files(path, skip)
+    _progress("clamscan", started, 0, total)
     log = keepwell_state.new_log(target)
-    argv = ["/usr/bin/clamscan", "--recursive", "--infected", "--log=" + log]
-    if target == "home":
-        # Caches, the Trash and Keepwell's own logs: rebuilt, already
-        # discarded, or written by the scan itself.
-        for sub in (".cache", ".local/share/Trash", ".local/state/keepwell"):
-            argv.append("--exclude-dir=^" + re.escape(os.path.join(HOME, sub)) + "(/|$)")
-    return _background(UNITS["clamscan"], "clamscan", argv + ["--", path], quiet)
+    argv = ["/usr/bin/clamscan", "--recursive", "--infected", "--verbose"]
+    argv += ["--exclude-dir=^" + re.escape(sub) + "(/|$)" for sub in skip]
+    fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "wb", buffering=0) as out:
+        proc = subprocess.Popen(argv + ["--", path], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env={"PATH": "/usr/bin", "HOME": HOME, "LC_ALL": "C"})
+        done, said = 0, time.monotonic()
+        for line in proc.stdout:
+            if line.startswith(b"Scanning "):
+                done += 1
+                if time.monotonic() - said >= 2:
+                    _progress("clamscan", started, done, total)
+                    said = time.monotonic()
+                continue
+            out.write(line[:4096])
+        rc = proc.wait()
+    # 0 nothing found, 1 something found; anything else is clamscan's error.
+    return 0 if rc in (0, 1) else rc
 
 
 def _scan_root(folder):
@@ -1027,9 +1091,11 @@ def osv_scan(root):
     """Runs inside the background unit. One osv-scanner run per project, so a
     huge folder can't stall the rest; a summary of what was found is kept."""
     started = int(time.time())
+    _progress("osv", started, 0, None)
     repos = find_repos(root)
     findings, scanned, failed, empty = [], 0, 0, 0
-    for repo in repos:
+    for n, repo in enumerate(repos):
+        _progress("osv", started, n, len(repos))
         if not repo.startswith("/"):
             continue
         # 0 nothing found, 1 vulnerabilities, 128 no dependency files. Any
@@ -1076,6 +1142,7 @@ def _infected(log):
 
 
 def notify(kind, quiet=False):
+    keepwell_state.remove("progress-%s.json" % kind)
     if quiet:
         _refresh()
         return 0
@@ -1173,9 +1240,11 @@ def leaks_scan(root):
     """Runs inside the background unit. Writes a summary with locations only:
     gitleaks redacts the secrets, and Keepwell keeps none of its text."""
     started = int(time.time())
+    _progress("gitleaks", started, 0, None)
     repos = find_repos(root)
     findings, scanned, failed = [], 0, 0
-    for repo in repos:
+    for n, repo in enumerate(repos):
+        _progress("gitleaks", started, n, len(repos))
         out = capture(["/usr/bin/gitleaks", "git", "--no-banner", "--redact", "--log-level", "error",
                        "--report-format", "json", "--report-path", "-", "--exit-code", "0",
                        "--timeout", "300", "--", repo], timeout=320, cap=16 << 20)
@@ -1661,6 +1730,8 @@ def main():
         return 0
     if len(args) in (2, 3) and args[0] == "notify" and args[1] in UNITS and args[2:] in ([], ["--quiet"]):
         return notify(args[1], args[2:] == ["--quiet"])
+    if len(args) == 2 and args[0] == "clam-scan" and args[1] in ("downloads", "home"):
+        return clam_scan(args[1])
     if len(args) == 2 and args[0] == "leaks-scan":
         return leaks_scan(args[1])
     if len(args) == 2 and args[0] == "osv":

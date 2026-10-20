@@ -377,9 +377,25 @@ def probe_antivirus():
                 p["defsAt"] = when
     p["scanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-clamscan.service"],
                          timeout=3, cap=256)[1].strip() in ("active", "activating")
+    if p["scanning"]:
+        p["progress"] = _progress("clamscan")
     p["lastScan"] = _last_scan()
     p["allowed"] = keepwell_av.count()
     return p
+
+
+def _progress(kind):
+    """How far a running background scan has got: {started, done, total},
+    total null while still counting."""
+    try:
+        doc = keepwell_state.read_json("progress-%s.json" % kind, cap=4096)
+    except (OSError, ValueError):
+        return None
+    if not doc or not isinstance(doc.get("started"), int) or not isinstance(doc.get("done"), int):
+        return None
+    total = doc.get("total")
+    return {"started": doc["started"], "done": max(0, doc["done"]),
+            "total": total if isinstance(total, int) and total >= 0 else None}
 
 
 def _last_scan():
@@ -833,6 +849,8 @@ def probe_tools():
     if p["gitleaks"]:
         p["leaksScanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-gitleaks.service"],
                                   timeout=3, cap=256)[1].strip() in ("active", "activating")
+        if p["leaksScanning"]:
+            p["leaksProgress"] = _progress("gitleaks")
         try:
             last = keepwell_state.read_json("gitleaks.json")
         except (OSError, ValueError):
@@ -842,6 +860,8 @@ def probe_tools():
     if p["osvScanner"]:
         p["osvScanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-osv.service"],
                                 timeout=3, cap=256)[1].strip() in ("active", "activating")
+        if p["osvScanning"]:
+            p["osvProgress"] = _progress("osv")
         try:
             osv = keepwell_state.read_json("osv.json")
         except (OSError, ValueError):

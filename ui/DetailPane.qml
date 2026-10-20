@@ -91,6 +91,45 @@ Rectangle {
         wrapMode: Text.WordWrap
       }
 
+      // A running scan's progress. While the total is still being counted
+      // the bar shows a short segment sliding back and forth.
+      ColumnLayout {
+        visible: !!root.check.progress
+        Layout.fillWidth: true
+        spacing: Tokens.sp(6)
+        Rectangle {
+          id: track
+          readonly property real fraction: root.check.progress ? root.check.progress.fraction : 0
+          Layout.fillWidth: true
+          implicitHeight: Tokens.sp(6)
+          radius: height / 2
+          color: Tokens.fill2
+          clip: true
+          Rectangle {
+            id: bar
+            height: parent.height
+            radius: parent.radius
+            color: Tokens.accent
+            width: track.fraction < 0 ? parent.width * 0.25 : parent.width * track.fraction
+            Behavior on width { enabled: track.fraction >= 0; NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+            SequentialAnimation on x {
+              running: track.visible && track.fraction < 0
+              loops: Animation.Infinite
+              NumberAnimation { from: 0; to: track.width * 0.75; duration: 1200; easing.type: Easing.InOutSine }
+              NumberAnimation { from: track.width * 0.75; to: 0; duration: 1200; easing.type: Easing.InOutSine }
+              onRunningChanged: if (!running) bar.x = 0
+            }
+          }
+        }
+        KText {
+          Layout.fillWidth: true
+          text: root.check.progress ? root.check.progress.text : ""
+          font.pixelSize: Tokens.small
+          color: Tokens.fg2
+          wrapMode: Text.WordWrap
+        }
+      }
+
       KText {
         Layout.fillWidth: true
         Layout.maximumWidth: Tokens.sp(560)
