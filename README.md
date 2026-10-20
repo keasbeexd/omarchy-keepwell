@@ -20,7 +20,7 @@ hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spe
 - A shield in the bar: a plain outline when all is well, a dot when something
   wants a look, an exclamation mark when something needs action.
 - Click it (or run `omarchy-shell keepwell toggle`) to open the window:
-  Security, Privacy and System Care in a rail on the left, a one-line summary
+  Privacy, Security and System Care in a rail on the left, a one-line summary
   of the section, the list of checks, and the selected check explained.
 
 Status is shown by shape and word, never by colour alone, so it reads the same

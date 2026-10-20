@@ -108,9 +108,9 @@ var CATALOG = {
 }
 
 var LAYOUT = [
-  { id: "security", name: "Security", checks: ["audit", "av", "upd", "outside", "fw", "remote", "leaks", "deps"] },
-  { id: "privacy", name: "Privacy", checks: ["browser", "netpriv", "apps", "cam", "traces", "perms"] },
-  { id: "care", name: "System Care", checks: ["clean", "unclaimed", "snap", "disk", "failed"] }
+  { id: "privacy", name: "Privacy", checks: ["traces", "perms", "browser", "cam", "apps", "netpriv"] },
+  { id: "security", name: "Security", checks: ["av", "deps", "fw", "audit", "remote", "leaks", "outside", "upd"] },
+  { id: "care", name: "System Care", checks: ["clean", "disk", "failed", "snap", "unclaimed"] }
 ]
 
 // ---------------------------------------------------------------- security
@@ -428,7 +428,7 @@ function deps(tools, now) {
       : !last.scanned ? "No projects found in that folder"
       : last.noLockfiles >= last.scanned ? "Nothing to check: no dependency files in " + plural(last.scanned, "project", "projects")
       : "No known vulnerabilities in your projects' dependencies",
-    meta: (fixable.length ? fixable.length + " fixable by updating · " : "") + "scanned " + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects"),
+    meta: (fixable.length ? fixable.length + " fixable by updating · scanned " : "Scanned ") + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects"),
     facts: facts,
     note: f.length ? "Each row is a library one of your projects uses, the worst problem it has, and the version that fixes it. Update it in that project (for example npm update, cargo update, go get -u, pip install -U), then scan again. Click a row for the advisory on osv.dev. Keepwell never changes your projects. " + network : network,
     actions: [{ label: "Scan again", primary: fixable.length > 0, rescan: "osv", folder: last.folder }]
