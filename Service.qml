@@ -236,6 +236,10 @@ Scope {
       startJob(["unclaimed", "unignore"], "Ignored folders will be suggested again.")
       return
     }
+    if (action.unignore === "virus") {
+      startJob(["virus", "forget"], "Files you marked as not a threat will show again when a scan flags them.")
+      return
+    }
     say("“" + action.label + "” arrives in the next build.")
   }
 
@@ -352,7 +356,8 @@ Scope {
   function openTrash(set, label, context) {
     if (lister.running || trasher.running) return
     trashSet = set
-    trashTitle = set === "cache" ? "Clear app caches" : set === "unclaimed" ? "Unclaimed app folders" : "Clear activity traces"
+    trashTitle = set === "cache" ? "Clear app caches" : set === "unclaimed" ? "Unclaimed app folders"
+      : set === "virus" ? "Files the virus scan flagged" : "Clear activity traces"
     trashContext = context
     trashItems = null
     trashFailed = false
@@ -388,19 +393,21 @@ Scope {
   function cancelTrash() { if (!trasher.running) trashOpen = false }
 
   // Unclaimed: a new age or an ignored folder is saved, then listed again.
+  // Virus: a file marked as not a threat is saved, then listed again.
   function relistAfter(args) {
     if (settingsWriter.running || lister.running) return
-    settingsWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "unclaimed"], args))
+    settingsWriter.start(python.concat([sourceDir + "/bin/keepwell-run"], args))
   }
   function chooseDays(days) {
     if ([90, 180, 365, 730].indexOf(days) === -1 || days === trashDays) return
     trashDays = days
-    relistAfter(["days", String(days)])
+    relistAfter(["unclaimed", "days", String(days)])
   }
   function ignoreItem(id) {
-    if (!/^[A-Za-z0-9._@+ \/-]{1,200}$/.test(id)) return
+    var virus = trashSet === "virus"
+    if (!(virus ? /^[0-9a-f]{16}$/ : /^[A-Za-z0-9._@+ \/-]{1,200}$/).test(id)) return
     trashItems = (trashItems || []).filter(function(i) { return i.id !== id })
-    relistAfter(["ignore", id])
+    relistAfter(virus ? ["virus", "allow", id] : ["unclaimed", "ignore", id])
   }
   BoundedProcess {
     id: settingsWriter
@@ -409,7 +416,7 @@ Scope {
     onFinished: {
       root.trashItems = null
       root.trashChecked = ({})
-      lister.start(root.python.concat([root.sourceDir + "/bin/keepwell-run", "list", "unclaimed"]))
+      lister.start(root.python.concat([root.sourceDir + "/bin/keepwell-run", "list", root.trashSet]))
       root.check(false)
     }
   }
@@ -816,6 +823,7 @@ Scope {
 
       item.trashOpen = Qt.binding(function() { return root.trashOpen })
       item.trashTitle = Qt.binding(function() { return root.trashTitle })
+      item.trashSet = Qt.binding(function() { return root.trashSet })
       item.trashContext = Qt.binding(function() { return root.trashContext })
       item.trashItems = Qt.binding(function() { return root.trashItems })
       item.trashFailed = Qt.binding(function() { return root.trashFailed })

@@ -47,6 +47,7 @@ Item {
   // The Trash sheet, driven by the service.
   property bool trashOpen: false
   property string trashTitle: ""
+  property string trashSet: ""
   property string trashContext: ""
   property var trashItems: null
   property bool trashFailed: false
@@ -527,6 +528,7 @@ Item {
           z: 10
           opened: root.trashOpen
           title: root.trashTitle
+          set: root.trashSet
           context: root.trashContext
           items: root.trashItems
           failed: root.trashFailed
