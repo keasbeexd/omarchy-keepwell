@@ -50,6 +50,9 @@ function onOff(v) { return v === true ? "On" : v === false ? "Off" : "Browser de
 
 function fact(k, v, owner) { return { k: k, v: v, owner: owner || "" } }
 
+// Every scan says when it ran the same way: how long ago, and the time.
+function scannedFact(at, now) { return fact("Scanned", ago(at, now), stamp(at)) }
+
 function check(base, fields) {
   var c = { facts: [], actions: [], note: "", meta: "" }
   for (var k in base) c[k] = base[k]
@@ -168,6 +171,7 @@ function audit(p, net, now) {
     return f
   })
   if (pkgs.length === 0) facts.push(fact("Packages", "No known issues"))
+  facts.unshift(fact("Checked", ago(p.at, now), stamp(p.at)))
 
   // Only a released fix is something to act on. An open issue with no fix
   // is worth knowing about, never worth alarming anyone over.
@@ -176,7 +180,8 @@ function audit(p, net, now) {
     ? "An update fixes " + plural(fixable.length, "known issue", "known issues")
     : pkgs.length ? plural(pkgs.length, "package has", "packages have") + " known issues, none fixed yet"
     : "No known issues in installed packages"
-  var meta = (fixable.length ? fixable.length + " fixable · " : "") + (pkgs.length - fixable.length) + " waiting for a fix · checked " + ago(p.at, now)
+  var meta = "Checked " + ago(p.at, now) + (fixable.length ? " · " + fixable.length + " fixable" : "")
+    + (pkgs.length - fixable.length ? " · " + (pkgs.length - fixable.length) + " waiting for a fix" : "")
     + (p.refreshFailed ? " · couldn't refresh (offline?)" : p.skipped === "metered" ? " · not refreshed on a metered connection" : "")
   var whatNow = fixable.length
     ? "Updating installs the fixed versions. Issues still waiting for a fix need nothing from you yet."
@@ -197,15 +202,16 @@ function antivirus(p, now) {
   var auto = p.freshclamEnabled === "enabled"
   var last = p.lastScan
   var where = function(t) { return t === "home" ? "Home folder" : "Downloads" }
-  var lastText = !last ? "No scans yet"
-    : !last.finished ? where(last.target) + " · " + ago(last.at, now) + " · stopped before the end"
-    : where(last.target) + " · " + ago(last.at, now) + " · " + (last.infected ? plural(last.infected, "infected file", "infected files")
-        : "nothing found") + (typeof last.files === "number" ? " in " + plural(last.files, "file", "files") : "")
   var facts = [
     fact("Definitions", age === null ? "None downloaded yet" : age === 0 ? "Updated today" : plural(age, "day", "days") + " old"),
-    fact("Auto-update", auto ? "On" : "Off", "clamav-freshclam"),
-    fact("Last scan", p.scanning ? "Scanning now…" : lastText, "Keepwell")
+    fact("Auto-update", auto ? "On" : "Off", "clamav-freshclam")
   ]
+  if (p.scanning) facts.push(fact("Scanned", "Scanning now…"))
+  else if (!last) facts.push(fact("Scanned", "Not yet"))
+  else facts = facts.concat([fact("Folder", where(last.target)), scannedFact(last.at, now),
+    fact("Files", !last.finished ? "Stopped before the end"
+      : (typeof last.files === "number" ? plural(last.files, "scanned", "scanned") + " · " : "")
+        + (last.infected ? plural(last.infected, "infected file", "infected files") : "nothing found"))])
   var found = last && last.finished && last.infected ? last.found || [] : []
   for (var i = 0; i < found.length; i++) facts.push(fact(i === 0 ? "Found" : "", found[i]))
   var stale = age === null || age > 7
@@ -221,7 +227,7 @@ function antivirus(p, now) {
     status: p.scanning ? "Scanning in the background…"
       : found.length ? plural(found.length, "infected file", "infected files") + " found"
       : age === null ? "No virus definitions yet" : stale ? "Virus definitions are " + age + " days old" : "Definitions are up to date",
-    meta: p.scanning ? "You'll get a notification when it's done" : last ? "Last scan " + ago(last.at, now) : "No scans yet",
+    meta: p.scanning ? "You'll get a notification when it's done" : last ? "Scanned " + ago(last.at, now) + " · " + where(last.target) : "No scans yet",
     facts: facts,
     note: found.length
       ? "Keepwell doesn't delete anything. Check each file: if you don't recognise it, move it to the Trash yourself; if you do, it may be a false alarm."
@@ -351,7 +357,8 @@ function leaks(tools, now) {
     note: "Keepwell finds the git repositories in your home folder (up to four levels down, following links like ~/Projects) and checks their history in the background. Secrets are masked; only where they are is kept.",
     actions: [home, choose] })
   var f = last.findings || []
-  var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder), fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
+  var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder), scannedFact(last.at, now),
+               fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
   for (var i = 0; i < Math.min(f.length, 30); i++)
     facts.push(fact(f[i].repo, f[i].file + (f[i].line ? ":" + f[i].line : ""), f[i].rule + (f[i].commit ? " · " + f[i].commit : "")))
   return check(b, { kind: f.length ? "attn" : "good",
@@ -395,7 +402,7 @@ function deps(tools, now) {
     actions: [home, choose] })
   var f = last.findings || []
   var fixable = f.filter(function(x) { return x.fixable })
-  var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder),
+  var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder), scannedFact(last.at, now),
                fact("Projects", plural(last.scanned, "scanned", "scanned")
                  + (last.noLockfiles ? " · " + last.noLockfiles + " without dependency files" : "")
                  + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
@@ -428,7 +435,7 @@ function deps(tools, now) {
       : !last.scanned ? "No projects found in that folder"
       : last.noLockfiles >= last.scanned ? "Nothing to check: no dependency files in " + plural(last.scanned, "project", "projects")
       : "No known vulnerabilities in your projects' dependencies",
-    meta: (fixable.length ? fixable.length + " fixable by updating · scanned " : "Scanned ") + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects"),
+    meta: "Scanned " + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects") + (fixable.length ? " · " + fixable.length + " fixable by updating" : ""),
     facts: facts,
     note: f.length ? "Each row is a library one of your projects uses, the worst problem it has, and the version that fixes it. Update it in that project (for example npm update, cargo update, go get -u, pip install -U), then scan again. Click a row for the advisory on osv.dev. Keepwell never changes your projects. " + network : network,
     actions: [{ label: "Scan again", primary: fixable.length > 0, rescan: "osv", folder: last.folder }]
