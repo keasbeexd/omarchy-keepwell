@@ -821,6 +821,12 @@ Scope {
       item.confirmOptionToggled.connect(root.toggleOption)
       item.confirmAllToggled.connect(root.toggleAllOptions)
 
+      // From the manifest the shell hands over; shown in the footer.
+      item.version = Qt.binding(function() {
+        var v = root.manifest && root.manifest.version
+        return typeof v === "string" && /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/.test(v) ? v : ""
+      })
+
       item.trashOpen = Qt.binding(function() { return root.trashOpen })
       item.trashTitle = Qt.binding(function() { return root.trashTitle })
       item.trashSet = Qt.binding(function() { return root.trashSet })
