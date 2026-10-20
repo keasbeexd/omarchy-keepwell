@@ -182,6 +182,7 @@ at 0600, written through a fresh temporary file and a rename.
 | `schedules.json` | your deep-scan schedule: days, time, which scans, the battery rule (kept when you turn it off, so turning it on again starts from there) |
 | `runs.json` | the last deep-scan run's time and one-line summary, and which missed run you were told about or dismissed |
 | `aur.json` | the last AUR answer: when it was asked, which foreign package names were checked, and which the AUR no longer has |
+| `progress-*.json` | while a background scan runs: when it started, how many files (or repositories) it has done and how many there are; removed when it ends |
 | `alerts.json` | which checks you've already been notified about, so each new problem notifies once |
 
 ## Actions
@@ -268,8 +269,17 @@ and disk priority, one of each kind at a time:
 systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
   --property=Nice=19 --property=IOSchedulingClass=idle \
   --property=ExecStopPost=/usr/bin/python3 -I -S <plugin>/bin/keepwell-run notify clamscan \
-  -- /usr/bin/clamscan --recursive --infected --log=<new log> [--exclude-dir=…] -- <folder>
+  -- /usr/bin/python3 -I -S <plugin>/bin/keepwell-run clam-scan downloads|home
 ```
+
+Inside that service, Keepwell first counts the files the scan will reach
+(at most 30 seconds; a home folder takes a few), then runs
+`/usr/bin/clamscan --recursive --infected --verbose [--exclude-dir=…] -- <folder>`
+and counts its `Scanning <file>` lines. Every two seconds it writes how far
+it has got to `progress-clamscan.json`, which the window shows as a bar with
+an estimate of the time left. The per-file lines are not kept: the log holds
+only the files found and clamscan's summary. The secrets and dependency
+scans report progress the same way, one repository at a time.
 
 - **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~` but
   skips `~/.cache`, `~/.local/share/Trash` and Keepwell's own logs. A home

@@ -53,6 +53,31 @@ function fact(k, v, owner) { return { k: k, v: v, owner: owner || "" } }
 // Every scan says when it ran the same way: how long ago, and the time.
 function scannedFact(at, now) { return fact("Scanned", ago(at, now), stamp(at)) }
 
+function thousands(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",") }
+
+function duration(s) {
+  if (s < 60) return "under a minute"
+  var m = Math.round(s / 60)
+  if (m < 60) return m + " min"
+  return Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : "")
+}
+
+// A running background scan's progress: { fraction, text } for the bar,
+// fraction -1 while the total isn't known yet. The time left is a straight
+// line from the pace so far, so it's held back until there's a pace to go by.
+function scanProgress(pr, now, counting, one, many) {
+  if (!pr || typeof pr.done !== "number") return null
+  if (typeof pr.total !== "number") return { fraction: -1, text: counting }
+  if (pr.total === 0) return { fraction: -1, text: "Scanning…" }
+  // The count taken before the scan can fall short (files added meanwhile).
+  if (pr.done >= pr.total) return { fraction: 0.99, text: "Almost done · " + thousands(pr.done) + " " + many + " so far" }
+  var f = Math.min(0.99, pr.done / pr.total)
+  var text = Math.floor(f * 100) + "% · " + thousands(pr.done) + " of " + plural(pr.total, one, many).replace(/^\d+/, thousands(pr.total))
+  var elapsed = now - pr.started
+  if (pr.done > 0 && elapsed >= 30 && f >= 0.01) text += " · about " + duration(elapsed * (pr.total - pr.done) / pr.done) + " left"
+  return { fraction: f, text: text }
+}
+
 function check(base, fields) {
   var c = { facts: [], actions: [], note: "", meta: "" }
   for (var k in base) c[k] = base[k]
@@ -217,6 +242,7 @@ function antivirus(p, now) {
   if (p.allowed) facts.push(fact("Not a threat", plural(p.allowed, "file", "files")
     + (last && last.allowedFound ? " · " + last.allowedFound + " flagged again, hidden" : ""), "marked by you"))
   var stale = age === null || age > 7
+  var progress = p.scanning ? scanProgress(p.progress, now, "Counting files…", "file", "files") : null
   var actions = []
   if (found.length && !p.scanning) actions.push({ label: "Review found files…", primary: true, trash: true, trashSet: "virus" })
   if (p.scanning) actions.push({ label: "Stop scan", primary: true, stop: "clamscan" })
@@ -231,7 +257,9 @@ function antivirus(p, now) {
     status: p.scanning ? "Scanning in the background…"
       : found.length ? plural(found.length, "infected file", "infected files") + " found"
       : age === null ? "No virus definitions yet" : stale ? "Virus definitions are " + age + " days old" : "Definitions are up to date",
-    meta: p.scanning ? "You'll get a notification when it's done" : last ? "Scanned " + ago(last.at, now) + " · " + where(last.target) : "No scans yet",
+    meta: p.scanning ? (progress ? progress.text : "You'll get a notification when it's done")
+      : last ? "Scanned " + ago(last.at, now) + " · " + where(last.target) : "No scans yet",
+    progress: progress,
     facts: facts,
     note: found.length
       ? "Check each file. If you don't recognise it, move it to the Trash. If you do (a game's DLL, a Wine or Proton file), it may be a false alarm: mark it as not a threat and it stays hidden until its contents change."
@@ -353,8 +381,9 @@ function leaks(tools, now) {
   var last = tools.leaks
   var home = { label: "Scan home folder", primary: !last, rescan: "leaks", folder: "~" }
   var choose = { label: "Choose another folder…", pick: "leaks" }
+  var leaksProgress = scanProgress(tools.leaksProgress, now, "Finding repositories…", "repository", "repositories")
   if (tools.leaksScanning) return check(b, { kind: "info", status: "Scanning in the background…",
-    meta: "You'll get a notification when it's done", facts: last ? [fact("Folder", last.folder)] : [],
+    meta: leaksProgress ? leaksProgress.text : "You'll get a notification when it's done", progress: leaksProgress, facts: last ? [fact("Folder", last.folder)] : [],
     actions: [{ label: "Stop scan", primary: true, stop: "gitleaks" }] })
   if (!last) return check(b, { kind: "off", status: "Ready to scan",
     meta: "Read-only: it reports, it never changes a repo", facts: [fact("Installed", "Yes")],
@@ -397,8 +426,9 @@ function deps(tools, now) {
   var last = tools.osv
   var home = { label: "Scan home folder", primary: !last, rescan: "osv", folder: "~" }
   var choose = { label: "Choose another folder…", pick: "osv" }
+  var osvProgress = scanProgress(tools.osvProgress, now, "Finding projects…", "project", "projects")
   if (tools.osvScanning) return check(b, { kind: "info", status: "Scanning in the background…",
-    meta: "You'll get a notification when it's done", facts: last ? [fact("Folder", last.folder === "~" ? "Home folder" : last.folder)] : [],
+    meta: osvProgress ? osvProgress.text : "You'll get a notification when it's done", progress: osvProgress, facts: last ? [fact("Folder", last.folder === "~" ? "Home folder" : last.folder)] : [],
     actions: [{ label: "Stop scan", primary: true, stop: "osv" }] })
   if (!last) return check(b, { kind: "off", status: "Ready to scan",
     meta: "Reads your projects' lockfiles; changes nothing", facts: [fact("Installed", "Yes")],
