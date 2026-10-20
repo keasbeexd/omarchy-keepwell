@@ -76,6 +76,7 @@ Item {
   // Keyboard cursor over the detail pane's actions; -1 while it is on the list.
   property int actionCursor: -1
   property string notice: ""
+  property string version: ""
 
   readonly property var section: sections.length > 0 ? sections[sectionIndex] : ({ checks: [], hero: {} })
   readonly property var checks: section.checks || []
@@ -490,6 +491,12 @@ Item {
               text: root.notice
               font.pixelSize: Tokens.caption
               color: root.notice !== "" ? Tokens.fg2 : Tokens.fg3
+            }
+            KText {
+              visible: root.version !== ""
+              text: "v" + root.version
+              font.pixelSize: Tokens.caption
+              color: Tokens.fg3
             }
           }
         }
