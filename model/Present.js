@@ -607,7 +607,7 @@ function permissions(p) {
 
 // ---------------------------------------------------------------- system care
 
-function cleanup(p) {
+function cleanup(p, disk) {
   var b = CATALOG.clean
   var safe = (p.pkgCache ? p.pkgCache.bytes || 0 : 0)
   var extraPkgs = p.pkgCacheAll ? Math.max(0, (p.pkgCacheAll.bytes || 0) - safe) : 0
@@ -615,8 +615,14 @@ function cleanup(p) {
   var orphans = p.orphans || { count: 0, bytes: 0 }
   var home = p.homeCache || { bytes: 0, complete: true }
   var total = safe + extraPkgs + removed + (orphans.bytes || 0) + (home.bytes || 0)
-  // A gigabyte or more is worth a look; less is just information.
-  return check(b, { kind: total >= 1e9 ? "attn" : "info",
+  var packages = safe + extraPkgs + removed + (orphans.bytes || 0)
+  // App caches refill on their own (a music app's cache alone can pass a
+  // gigabyte), so a fixed size nagged right after every cleanup. Ask for a
+  // look only when the disk is getting full (the Disk check's own line, or
+  // under 10 GB free) and there's a gigabyte to win, or when old packages
+  // alone pass 10 GB, which only grows until someone clears it.
+  var low = !!(disk && disk.size) && (disk.used / disk.size >= 0.8 || disk.free < 10e9)
+  return check(b, { kind: (low && total >= 1e9) || packages >= 10e9 ? "attn" : "info",
     status: total > 0 ? "Up to " + bytes(total) + " can be freed" : "Nothing to clean up",
     meta: "App cache " + bytes(home.bytes) + " · package cache " + bytes(safe + extraPkgs + removed) + " · logs " + bytes(p.journalBytes),
     facts: [
@@ -784,7 +790,7 @@ function build(doc, now) {
     cam: function() { return media(p("media")) },
     traces: function() { return traces(p("traces")) },
     perms: function() { return permissions(p("permissions")) },
-    clean: function() { return cleanup(p("cleanup")) },
+    clean: function() { return cleanup(p("cleanup"), p("disk")) },
     unclaimed: function() { return unclaimed(p("unclaimed")) },
     snap: function() { return snapshots(p("snapshots"), now) },
     disk: function() { return disk(p("disk")) },
