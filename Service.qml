@@ -356,7 +356,8 @@ Scope {
   function openTrash(set, label, context) {
     if (lister.running || trasher.running) return
     trashSet = set
-    trashTitle = set === "cache" ? "Clear app caches" : set === "unclaimed" ? "Unclaimed app folders"
+    trashTitle = set === "cache" ? "Clear app caches" : set === "devcache" ? "Clear developer caches"
+      : set === "unclaimed" ? "Unclaimed app folders" : set === "launchers" ? "Broken launchers"
       : set === "virus" ? "Files the virus scan flagged" : "Clear activity traces"
     trashContext = context
     trashItems = null
@@ -457,7 +458,7 @@ Scope {
         var bytes = (root.trashItems || []).filter(function(i) { return d.trashed.indexOf(i.id) !== -1 })
                                            .reduce(function(n, i) { return n + i.bytes }, 0)
         root.say(d.trashed.length ? "Moved " + d.trashed.length + " to Trash (" + Present.bytes(bytes)
-                   + "). Empty the Trash to free the space." + (d.failed.length ? " " + d.failed.length + " couldn't be moved." : "")
+                   + "). Empty the Trash from Cleanup to free the space." + (d.failed.length ? " " + d.failed.length + " couldn't be moved." : "")
                  : "Nothing could be moved.")
       }
       root.check(false)

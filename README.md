@@ -120,9 +120,9 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Data from your apps | `~/.config/Code/User/settings.json` (one key) | — |
 | Activity traces | counts in `~/.local/share/recently-used.xbel`, `~/.bash_history`; size of `~/.cache/thumbnails` | — |
 | App permissions | — | `flatpak list --app` |
-| Cleanup | size of `~/.cache` | `paccache -d` (dry run), `pacman -Qtdq`, `pacman -Qi`, `journalctl --disk-usage` |
+| Cleanup | size of `~/.cache`, of the developer caches outside it (see Moving things to Trash) and of `~/.local/share/Trash/files`; names and sizes in `/var/lib/systemd/coredump` (the folder is readable without root, the dumps aren't) | `paccache -d` (dry run), `pacman -Qtdq`, `pacman -Qi`, `journalctl --disk-usage` |
 | Snapshots | `/etc/snapper/configs/root` (how many are kept) | `systemctl is-enabled limine-snapper-sync`; `journalctl -u limine-snapper-sync -g CREATE,ISDIR -n 1` — the snapshot list is root-only, but the boot-menu sync service logs each new snapshot's number, and the journal is readable without root |
-| Unclaimed files | names in `/usr/bin`, `~/.local/bin`, `~/.local/share/mise/shims`, `~/.var/app` and the desktop-entry folders; `.config/<name>` and `.local/share/<name>` mentions in Omarchy's own text files under `/usr/share/omarchy` (at most 24 MiB read, cached); modification times inside candidate folders | `pacman -Qq` |
+| Unclaimed files | names in `/usr/bin`, `~/.local/bin`, `~/.local/share/mise/shims`, `~/.var/app` and the desktop-entry folders; `.config/<name>` and `.local/share/<name>` mentions in Omarchy's own text files under `/usr/share/omarchy` (at most 24 MiB read, cached); modification times inside candidate folders; the `[Desktop Entry]` group of your `.desktop` files in `~/.local/share/applications` and `~/.config/autostart` (64 KiB each) | `pacman -Qq`, `systemctl --user show-environment` (only `PATH` is kept) |
 | Disk usage | free space on `/` | — |
 | Failed services | — | `systemctl list-units --state=failed --output=json` and the same with `--user` (unit name and description only) |
 
@@ -221,6 +221,7 @@ script, `bin/keepwell-run`, in three steps:
 | Clear the failed list | `sudo systemctl reset-failed -- <system units>`, `systemctl --user reset-failed -- <your units>`; nothing is restarted |
 | Update the system | `omarchy update` |
 | Take a snapshot | `omarchy snapshot create` |
+| Empty Trash | `gio trash --empty` (no password; also empties the Trash on other drives) |
 | Clean up (you tick which) | `sudo paccache -r -k 3` (old versions, or `-k 1` for all but the newest), `sudo paccache -r -u -k 0` (downloads of removed packages), `sudo pacman -Rns -- <unused packages, listed>`, `sudo journalctl --vacuum-time=2weeks` |
 
 The cleanup sheet measures each option first (`paccache -d`, `pacman -Qtdq`,
@@ -345,6 +346,18 @@ claims its name** and **nothing in it has changed** for the age you choose
   folder again (**Stop ignoring** on the check undoes that). A folder is
   moved only if it is still a candidate at that moment.
 
+The same check finds **broken launchers**: your own app entries
+(`~/.local/share/applications`, subfolders included, where Wine puts its
+games) and autostart entries (`~/.config/autostart`) whose program is gone.
+An entry is broken when its `TryExec` or `Exec` program can't be found in
+your session's `PATH` or the usual program folders, when the Flatpak app it
+runs isn't installed, or when the Wine folder it names (`WINEPREFIX`) is
+gone. It errs the same way: entries hidden with `Hidden=true` (how you turn
+off a system autostart entry), entries that run a shell (`sh -c …`) and
+relative paths are never called broken. Age doesn't matter: a broken entry
+does nothing however new it is. **Review broken launchers…** moves what you
+tick to the Trash; an entry is moved only if it is still broken then.
+
 ### Scheduled deep scans
 
 Off until you turn them on. **Schedule…** at the bottom of the left rail (or
@@ -385,15 +398,34 @@ missed. Next: …" — with **Run now** (**M**) and **Dismiss** (**D**).
 
 ### Moving things to Trash
 
-App caches (folders directly inside `~/.cache`) and activity traces (the
-recent-files list, `~/.bash_history`, `~/.cache/thumbnails`) are cleared
+App caches (folders directly inside `~/.cache`, thumbnails included),
+developer caches, activity traces (the recent-files list, `~/.bash_history`,
+`~/.cache/thumbnails`), unclaimed folders and broken launchers are cleared
 without root or a terminal. A sheet lists every item with its size, nothing
 ticked; what you tick is moved with `gio trash`, one item at a time, so it
-can be restored from the Trash. The space is freed when you empty the Trash.
-Items are named by id, never by path: a cache item must be a plain name
-directly inside `~/.cache` that you own, traces come from a fixed list, and
-a flagged file must still be named in the newest scan log and be a file you
-own inside your home.
+can be restored from the Trash. The space is freed when you empty the Trash
+(**Empty Trash** on Cleanup, shown while the Trash holds something; that
+step can't be undone, so it goes through the confirm sheet and a terminal
+like the other actions). Items are named by id, never by path: a cache item
+must be a plain name directly inside `~/.cache` that you own, traces and
+developer caches come from fixed lists, unclaimed folders and broken
+launchers must still be found at that moment, and a flagged file must still
+be named in the newest scan log and be a file you own inside your home.
+
+Developer caches are download caches their tool fills again when a project
+needs them: npm (`~/.npm/_cacache`), Cargo (`~/.cargo/registry`,
+`~/.cargo/git`), Maven (`~/.m2/repository`), Gradle (`~/.gradle/caches`),
+bun (`~/.bun/install/cache`) and NuGet (`~/.nuget/packages`). Each must be a
+folder you own, reached without a symlink. Caches already inside `~/.cache`
+(pip, uv, yarn, Go's build cache) are under app caches. Go's module cache is
+left out because its files are read-only, so emptying the Trash would fail
+on it (`go clean -modcache` clears it), and pnpm's store because projects
+hard-link into it, so moving it frees far less than its size says (`pnpm
+store prune` clears it).
+
+Crash dumps in `/var/lib/systemd/coredump` are counted on Cleanup but not
+offered for removal: removing them needs root, and systemd deletes them
+after two weeks.
 
 Opening an app (GufW, Flatseal, Disk Usage Analyzer, VS Code) runs
 `uwsm-app -- <app>.desktop` and closes Keepwell.
