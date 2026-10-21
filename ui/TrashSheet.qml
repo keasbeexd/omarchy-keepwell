@@ -9,7 +9,8 @@ import "../model/Present.js" as Present
 // The heading and the buttons stay put; only the list scrolls, and it
 // follows the keyboard cursor. For unclaimed folders the sheet also shows
 // how long each has been untouched, an age choice, and "Ignore" per row; for
-// files the virus scan flagged, "Not a threat" per row.
+// files the virus scan flagged, "Not a threat" per row. Developer caches and
+// broken launchers only change the wording.
 Item {
   id: root
 
@@ -34,6 +35,8 @@ Item {
   readonly property var list: items || []
   readonly property bool unclaimed: dayChoices.length > 0
   readonly property bool virus: set === "virus"
+  readonly property bool launchers: set === "launchers"
+  readonly property bool devcache: set === "devcache"
   readonly property bool canIgnore: unclaimed || virus
   readonly property var chosen: list.filter(function(i) { return root.checked[i.id] === true })
   readonly property real chosenBytes: chosen.reduce(function(n, i) { return n + (i.bytes || 0) }, 0)
@@ -123,9 +126,11 @@ Item {
           text: root.failed ? "Couldn't list these right now. Nothing was moved."
             : root.items === null ? "Looking…"
             : root.list.length === 0 ? (root.unclaimed ? "No unclaimed folder has been untouched that long."
-              : root.virus ? "Nothing left to review." : "There is nothing here to clear.")
+              : root.virus ? "Nothing left to review." : root.launchers ? "No broken launchers." : "There is nothing here to clear.")
             : root.unclaimed ? "Nothing installed uses these, and nothing in them has changed for a long time. Check each one before ticking it — a folder can still hold something you want."
             : root.virus ? "ClamAV matched these against known malware. Tick what you don't recognise to move it to the Trash. If you know where a file came from (a game's DLL, a Wine or Proton file), it may be a false alarm."
+            : root.launchers ? "These app and autostart entries start a program that is no longer installed, so they do nothing. Tick what to move to Trash."
+            : root.devcache ? "Tick what to move to Trash. Each tool downloads what it needs again the next time you build a project, which needs the network and takes longer that once."
             : "Tick what to move to Trash. Apps rebuild their caches when they need them, which can make them a little slower the first time."
           color: Tokens.fg2
           wrapMode: Text.WordWrap

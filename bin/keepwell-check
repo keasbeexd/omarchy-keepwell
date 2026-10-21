@@ -43,6 +43,7 @@ import keepwell_state  # noqa: E402
 import keepwell_av  # noqa: E402
 import keepwell_unclaimed  # noqa: E402
 import keepwell_schedule  # noqa: E402
+import keepwell_caches  # noqa: E402
 
 START = time.monotonic()
 TOTAL_BUDGET = 25.0          # seconds for the whole run
@@ -572,12 +573,49 @@ def probe_cleanup():
     p["orphans"] = orphans
     size, complete = tree_size(os.path.join(HOME, ".cache"))
     p["homeCache"] = {"bytes": size, "complete": complete}
+    dev = {"bytes": 0, "complete": True}
+    for key in keepwell_caches.DEV_CACHES:
+        path = keepwell_caches.resolve(key)
+        if path:
+            size, complete = tree_size(path, budget_seconds=1.0)
+            dev["bytes"] += size
+            dev["complete"] = dev["complete"] and complete
+    p["devCache"] = dev
+    trash = os.path.join(HOME, ".local", "share", "Trash", "files")
+    size, complete = tree_size(trash, budget_seconds=1.5)
+    try:
+        count = len(os.listdir(trash))
+    except OSError:
+        count = 0
+    p["trash"] = {"bytes": size, "count": count, "complete": complete}
+    p["coredumps"] = _coredumps()
     _, out = text(["/usr/bin/journalctl", "--disk-usage"], timeout=5, cap=4096)
     m = re.search(r"take up ([0-9.]+)([KMGT]?)\b", out)
     if m:
         mult = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}[m.group(2)]
         p["journalBytes"] = int(float(m.group(1)) * mult)
     return p
+
+
+def _coredumps():
+    """Crash dumps systemd keeps. The folder is world-readable even though
+    the dumps aren't, so their sizes can be read without root."""
+    count, total = 0, 0
+    try:
+        with os.scandir("/var/lib/systemd/coredump") as it:
+            for entry in it:
+                if count >= 2000:
+                    break
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if entry.name.startswith("core.") and stat.S_ISREG(st.st_mode):
+                    count += 1
+                    total += st.st_blocks * 512
+    except OSError:
+        return None
+    return {"count": count, "bytes": total}
 
 
 def probe_snapshots():
@@ -766,7 +804,8 @@ def probe_schedule():
 def probe_unclaimed():
     found = keepwell_unclaimed.find()
     return {"count": len(found["items"]), "bytes": sum(i["bytes"] for i in found["items"]),
-            "days": found["days"], "ignored": found["ignored"], "looked": found["looked"]}
+            "days": found["days"], "ignored": found["ignored"], "looked": found["looked"],
+            "launchers": len(keepwell_unclaimed.broken_launchers())}
 
 
 def _sshd_settings():

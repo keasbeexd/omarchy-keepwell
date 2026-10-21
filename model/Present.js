@@ -124,9 +124,9 @@ var CATALOG = {
     what: "Flatpak apps ask for access to files, devices and the network. Flatseal shows and changes those permissions, one app at a time." },
 
   clean: { id: "clean", title: "Cleanup", tool: "paccache · pacman",
-    what: "Old package downloads, unused packages, logs and app caches build up over time. You see every item and its size before anything is removed." },
+    what: "Old package downloads, unused packages, logs, app and developer caches, and the Trash build up over time. You see every item and its size before anything is removed." },
   unclaimed: { id: "unclaimed", title: "Unclaimed files", tool: "Keepwell",
-    what: "App folders in your home that nothing installed uses any more and that haven't changed in a long time — usually left behind by apps you removed. Suggestions only; nothing is removed unless you tick it." },
+    what: "App folders in your home that nothing installed uses any more and that haven't changed in a long time — usually left behind by apps you removed — and launchers whose program is gone. Suggestions only; nothing is removed unless you tick it." },
   snap: { id: "snap", title: "Snapshots", tool: "Snapper · Limine",
     what: "A snapshot is a restore point for the system (not your home folder). To roll back, pick it from the boot menu." },
   disk: { id: "disk", title: "Disk usage", tool: "Disk usage",
@@ -644,7 +644,9 @@ function cleanup(p, disk) {
   var removed = p.pkgUninstalled ? p.pkgUninstalled.bytes || 0 : 0
   var orphans = p.orphans || { count: 0, bytes: 0 }
   var home = p.homeCache || { bytes: 0, complete: true }
-  var total = safe + extraPkgs + removed + (orphans.bytes || 0) + (home.bytes || 0)
+  var dev = p.devCache || { bytes: 0, complete: true }
+  var trash = p.trash || { bytes: 0, count: 0, complete: true }
+  var total = safe + extraPkgs + removed + (orphans.bytes || 0) + (home.bytes || 0) + (dev.bytes || 0) + (trash.bytes || 0)
   var packages = safe + extraPkgs + removed + (orphans.bytes || 0)
   // App caches refill on their own (a music app's cache alone can pass a
   // gigabyte), so a fixed size nagged right after every cleanup. Ask for a
@@ -652,19 +654,31 @@ function cleanup(p, disk) {
   // under 10 GB free) and there's a gigabyte to win, or when old packages
   // alone pass 10 GB, which only grows until someone clears it.
   var low = !!(disk && disk.size) && (disk.used / disk.size >= 0.8 || disk.free < 10e9)
+  var facts = [
+    fact("Old package versions", bytes(safe), "Safe · keeps 3"),
+    fact("Removed packages' downloads", bytes(removed), "Safe"),
+    fact("All but newest", bytes(extraPkgs), "Advanced · keeps 1"),
+    fact("Unused packages", orphans.count ? plural(orphans.count, "package", "packages") + " · " + bytes(orphans.bytes) : "None", "Advanced"),
+    fact("App cache", bytes(home.bytes) + (home.complete ? "" : "+"), "Review each"),
+    fact("Developer caches", bytes(dev.bytes) + (dev.complete ? "" : "+"), "npm, Cargo, Maven… · review each"),
+    fact("System logs", bytes(p.journalBytes), "journal"),
+    fact("Trash", trash.count ? plural(trash.count, "item", "items") + " · " + bytes(trash.bytes) + (trash.complete ? "" : "+") : "Empty",
+         "emptying can't be undone")
+  ]
+  // Crash dumps need root to remove, and systemd removes them itself after
+  // two weeks, so they are shown but not counted as something to free.
+  if (p.coredumps && p.coredumps.count)
+    facts.push(fact("Crash reports", plural(p.coredumps.count, "report", "reports") + " · " + bytes(p.coredumps.bytes),
+                    "systemd removes them after 2 weeks"))
+  var actions = [{ label: "Review cleanup…", primary: true, elevated: true, act: "cleanup" },
+                 { label: "Review app cache…", trash: true, trashSet: "cache" }]
+  if (dev.bytes > 0) actions.push({ label: "Review developer caches…", trash: true, trashSet: "devcache" })
+  if (trash.count > 0) actions.push({ label: "Empty Trash (" + bytes(trash.bytes) + ")…", act: "empty-trash" })
   return check(b, { kind: (low && total >= 1e9) || packages >= 10e9 ? "attn" : "info",
     status: total > 0 ? "Up to " + bytes(total) + " can be freed" : "Nothing to clean up",
-    meta: "App cache " + bytes(home.bytes) + " · package cache " + bytes(safe + extraPkgs + removed) + " · logs " + bytes(p.journalBytes),
-    facts: [
-      fact("Old package versions", bytes(safe), "Safe · keeps 3"),
-      fact("Removed packages' downloads", bytes(removed), "Safe"),
-      fact("All but newest", bytes(extraPkgs), "Advanced · keeps 1"),
-      fact("Unused packages", orphans.count ? plural(orphans.count, "package", "packages") + " · " + bytes(orphans.bytes) : "None", "Advanced"),
-      fact("App cache", bytes(home.bytes) + (home.complete ? "" : "+"), "Review each"),
-      fact("System logs", bytes(p.journalBytes), "journal")
-    ],
-    actions: [{ label: "Review cleanup…", primary: true, elevated: true, act: "cleanup" },
-              { label: "Review app cache…", trash: true, trashSet: "cache" }] })
+    meta: "App cache " + bytes(home.bytes) + " · package cache " + bytes(safe + extraPkgs + removed) + " · logs " + bytes(p.journalBytes)
+      + (trash.bytes ? " · Trash " + bytes(trash.bytes) : ""),
+    facts: facts, actions: actions })
 }
 
 var AGE_WORDS = { 90: "3 months", 180: "6 months", 365: "1 year", 730: "2 years" }
@@ -673,17 +687,21 @@ function ageWords(days) { return AGE_WORDS[days] || plural(days, "day", "days") 
 function unclaimed(p) {
   var b = CATALOG.unclaimed
   if (typeof p.count !== "number") return check(b, { kind: "off", status: "Couldn't look this time", meta: "Try Refresh" })
+  var broken = p.launchers || 0
   var review = { label: "Review…", primary: p.count > 0, trash: true, trashSet: "unclaimed" }
   var facts = [
     fact("Looked at", plural(p.looked, "app folder", "app folders") + " nothing installed claims", "~, ~/.config, ~/.local/share"),
     fact("Untouched for", ageWords(p.days) + " or more", "adjustable")
   ]
   if (p.ignored) facts.push(fact("Ignored", plural(p.ignored, "folder", "folders"), "never suggested"))
+  facts.push(fact("Broken launchers", broken ? String(broken) : "None", "app and autostart entries whose program is gone"))
   var actions = [review]
+  if (broken) actions.push({ label: "Review broken launchers…", primary: !p.count, trash: true, trashSet: "launchers" })
   if (p.ignored) actions.push({ label: "Stop ignoring " + plural(p.ignored, "folder", "folders"), unignore: "unclaimed" })
   return check(b, {
-    kind: p.count ? "info" : "good",
-    status: p.count ? plural(p.count, "app folder", "app folders") + " nothing uses any more" : "Nothing left behind",
+    kind: p.count || broken ? "info" : "good",
+    status: p.count ? plural(p.count, "app folder", "app folders") + " nothing uses any more"
+      : broken ? plural(broken, "broken launcher", "broken launchers") : "Nothing left behind",
     meta: p.count ? bytes(p.bytes) + " · untouched for " + ageWords(p.days) + " or more · verify before removing"
       : "No unclaimed folder untouched for " + ageWords(p.days),
     facts: facts,

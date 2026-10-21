@@ -18,12 +18,18 @@ inside it has changed for the chosen number of days.
 Only three places are looked at: hidden entries directly in ~, and entries
 in ~/.config and ~/.local/share. Your own files (Documents and the like) are
 never looked at, and symlinks are never suggested.
+
+It also finds broken launchers: your own app entries and autostart entries
+(.desktop files) whose program is gone, usually left by an app you removed or
+by a Wine game you deleted. Here too it leans towards "fine": an entry is
+only broken when the program it names is clearly missing.
 """
 
 import json
 import os
 import re
 import select
+import shlex
 import signal
 import stat
 import subprocess
@@ -60,9 +66,12 @@ def norm(name):
 
 
 def _capture(argv, timeout=10.0, cap=4 << 20):
+    env = {"PATH": "/usr/bin", "LC_ALL": "C"}
+    # `systemctl --user` reaches your session's service manager through these.
+    env.update({k: os.environ[k] for k in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS") if k in os.environ})
     try:
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                env={"PATH": "/usr/bin", "LC_ALL": "C"}, cwd="/", start_new_session=True)
+                                env=env, cwd="/", start_new_session=True)
     except OSError:
         return ""
     deadline, out, size = time.monotonic() + timeout, [], 0
@@ -280,3 +289,130 @@ def resolve(item):
         return None
     ids = {c["id"] for c in find()["items"]}
     return os.path.join(HOME, item) if item in ids else None
+
+
+# ---------------------------------------------------------------- launchers
+
+LAUNCHER_DIRS = (".local/share/applications", ".config/autostart")
+LAUNCHER_BUDGET = 3000       # entries examined across both folders
+LAUNCHER_DEPTH = 4           # Wine nests its entries in Programs/<game>/
+FIXED_BIN_DIRS = ("/usr/bin", "/usr/local/bin", "/usr/share/omarchy/bin")
+# Shells run a command line we'd have to guess at, so an entry that starts
+# one is never called broken.
+SHELLS = {"sh", "bash", "zsh", "dash", "fish"}
+
+
+def _search_dirs():
+    """Where a launcher's program may be: the usual places, your session's
+    PATH (what launchers actually run with) and this process's PATH."""
+    dirs = list(FIXED_BIN_DIRS) + [os.path.join(HOME, d) for d in (".local/bin", "bin", ".local/share/mise/shims")]
+    for line in _capture(["/usr/bin/systemctl", "--user", "show-environment"], timeout=3, cap=256 * 1024).splitlines():
+        if line.startswith("PATH="):
+            dirs += line[5:].split(":")
+    dirs += os.environ.get("PATH", "").split(":")
+    return [d for d in dict.fromkeys(dirs) if os.path.isabs(d)]
+
+
+def _found(program, dirs):
+    if "/" in program:
+        # A relative path depends on the working directory: can't tell.
+        return not os.path.isabs(program) or os.path.exists(program)
+    return any(os.access(os.path.join(d, program), os.X_OK) for d in dirs)
+
+
+def _flatpak_installed(app_id):
+    return any(os.path.isdir(os.path.join(d, app_id))
+               for d in ("/var/lib/flatpak/app", os.path.join(HOME, ".local", "share", "flatpak", "app")))
+
+
+def _desktop_keys(data):
+    """The [Desktop Entry] group's keys (unlocalised only)."""
+    keys, inside = {}, False
+    for line in data.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            inside = line == "[Desktop Entry]"
+        elif inside and "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            keys.setdefault(k.strip(), v.strip())
+    return keys
+
+
+def why_broken(keys, dirs):
+    """What is missing, in a few words, or None when the entry may work."""
+    if keys.get("Hidden", "").lower() == "true" or keys.get("Type", "Application") != "Application":
+        return None
+    try_exec = keys.get("TryExec")
+    if try_exec and not _found(try_exec, dirs):
+        return os.path.basename(try_exec) + " is gone"
+    try:
+        argv = shlex.split(keys.get("Exec", ""))
+    except ValueError:
+        return None
+    if argv and argv[0] == "env":
+        argv = argv[1:]
+        while argv and "=" in argv[0] and not argv[0].startswith("-"):
+            name, value = argv[0].split("=", 1)
+            if name == "WINEPREFIX" and os.path.isabs(value) and not os.path.isdir(value):
+                return "its Wine folder is gone"
+            argv = argv[1:]
+        if argv and argv[0].startswith("-"):
+            return None
+    if not argv or os.path.basename(argv[0]) in SHELLS:
+        return None
+    if not _found(argv[0], dirs):
+        return os.path.basename(argv[0]) + " is gone"
+    if os.path.basename(argv[0]) == "flatpak" and "run" in argv:
+        rest = [a for a in argv[argv.index("run") + 1:] if not a.startswith("-")]
+        if rest and re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", rest[0]) and not _flatpak_installed(rest[0]):
+            return "Flatpak app " + rest[0] + " is gone"
+    return None
+
+
+def _valid_launcher_id(item):
+    parts = item.split("/")
+    prefix = next((d for d in LAUNCHER_DIRS if item.startswith(d + "/")), None)
+    return (prefix is not None and item.endswith(".desktop") and len(item) <= 128
+            and all(_plain_name(p) for p in parts[len(prefix.split("/")):]))
+
+
+def broken_launchers():
+    """[{id, path, label, bytes}] for your own .desktop entries whose
+    program is gone. Symlinks and files you don't own are never listed."""
+    dirs, budget, out = _search_dirs(), [LAUNCHER_BUDGET], []
+    for rel in LAUNCHER_DIRS:
+        stack = [(rel, 0)]
+        while stack and budget[0] > 0:
+            folder, depth = stack.pop()
+            for name in sorted(_names(os.path.join(HOME, folder), 1000)):
+                budget[0] -= 1
+                item = folder + "/" + name
+                path = os.path.join(HOME, item)
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    continue
+                if st.st_uid != UID:
+                    continue
+                if stat.S_ISDIR(st.st_mode) and depth < LAUNCHER_DEPTH:
+                    stack.append((item, depth + 1))
+                if not stat.S_ISREG(st.st_mode) or not _valid_launcher_id(item):
+                    continue
+                try:
+                    with open(path, "rb") as fh:
+                        keys = _desktop_keys(fh.read(64 * 1024))
+                except OSError:
+                    continue
+                why = why_broken(keys, dirs)
+                if why:
+                    label = re.sub(r"[\x00-\x1f\x7f]", "", keys.get("Name", "") or name[:-8])[:80]
+                    out.append({"id": item, "path": "~/" + item, "label": label + " — " + why,
+                                "bytes": st.st_blocks * 512})
+    return out[:60]
+
+
+def resolve_launcher(item):
+    """The path for a broken launcher id, only if it is still broken now."""
+    if not _valid_launcher_id(item):
+        return None
+    return os.path.join(HOME, item) if item in {c["id"] for c in broken_launchers()} else None

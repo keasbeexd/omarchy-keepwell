@@ -31,9 +31,10 @@
 
 --with picks among an action's options (cleanup, for one); without it the
 options marked safe are used. Sets for Trash are "cache" (folders in
-~/.cache), "traces" (recent files, shell history, thumbnails) and
-"unclaimed" (see keepwell_unclaimed.py); moving to Trash needs no root, and
-everything moved can be restored from the Trash.
+~/.cache), "devcache" (developer caches outside it, keepwell_caches.py),
+"traces" (recent files, shell history, thumbnails), "unclaimed" and
+"launchers" (see keepwell_unclaimed.py) and "virus"; moving to Trash needs
+no root, and everything moved can be restored from the Trash.
 
 Both modes build the plan from the same table below, so the commands the
 confirm dialog shows are the commands that run. Actions are a fixed set and
@@ -64,6 +65,7 @@ import keepwell_state  # noqa: E402
 import keepwell_av  # noqa: E402
 import keepwell_unclaimed  # noqa: E402
 import keepwell_schedule  # noqa: E402
+import keepwell_caches  # noqa: E402
 
 OMARCHY = "/usr/bin/omarchy"
 SUDO = "/usr/bin/sudo"
@@ -291,6 +293,10 @@ ACTIONS = {
         title="Clear the failed list",
         summary="Forgets that these services failed. Nothing is restarted or changed; any that fail again will show up again.",
         system=False, steps=lambda o: _failed_reset()),
+    "empty-trash": dict(
+        title="Empty the Trash",
+        summary="Deletes everything in the Trash for good, including the Trash folders on other drives. Nothing in it can be restored afterwards.",
+        system=False, steps=lambda o: [step("Empty the Trash", ["/usr/bin/gio", "trash", "--empty"])]),
     "snapshot": dict(
         title="Take a snapshot",
         summary="Creates a restore point of the system (not your home folder), which you can boot into from the boot menu.",
@@ -1600,11 +1606,15 @@ def _owned(path):
 
 def resolve(which, item):
     """The absolute path for an item id, or None. Never a path from outside:
-    traces come from a fixed map, cache items must be a plain name directly
-    inside ~/.cache that you own, and an unclaimed item must still be one of
-    the finder's candidates right now."""
+    traces and developer caches come from fixed maps, cache items must be a
+    plain name directly inside ~/.cache that you own, and an unclaimed folder
+    or broken launcher must still be one of the finder's candidates right now."""
     if which == "unclaimed":
         return keepwell_unclaimed.resolve(item)
+    if which == "launchers":
+        return keepwell_unclaimed.resolve_launcher(item)
+    if which == "devcache":
+        return keepwell_caches.resolve(item)
     if which == "virus":
         found = _virus_found().get(item)
         return found[0] if found else None
@@ -1642,6 +1652,17 @@ def list_items(which):
                 "ignored": found["ignored"], "looked": found["looked"],
                 "items": [{"id": c["id"], "label": c["id"].split("/")[-1], "path": c["path"],
                            "bytes": c["bytes"], "complete": True, "days": c["days"]} for c in found["items"]]}
+    if which == "launchers":
+        items = [dict(i, complete=True) for i in keepwell_unclaimed.broken_launchers()]
+        return {"set": which, "items": items}
+    if which == "devcache":
+        for key, (label, rel) in keepwell_caches.DEV_CACHES.items():
+            path = keepwell_caches.resolve(key)
+            if path:
+                size, complete = tree_size(path, budget)
+                items.append({"id": key, "label": label, "path": "~/" + rel, "bytes": size, "complete": complete})
+        items.sort(key=lambda i: -i["bytes"])
+        return {"set": which, "items": items}
     if which == "virus":
         for key, (path, sig) in list(_virus_found().items())[:40]:
             st = _owned(path)
@@ -1662,7 +1683,7 @@ def list_items(which):
             names = []
         for name in names:
             path = resolve("cache", name)
-            if not path or name == "thumbnails":    # thumbnails live under Activity traces
+            if not path:
                 continue
             size, complete = tree_size(path, budget)
             items.append({"id": name, "label": name, "path": "~/.cache/" + name,
@@ -1711,7 +1732,7 @@ def main():
         keepwell_av.forget_all()
         sys.stdout.write(json.dumps({"saved": True}))
         return 0
-    if len(args) >= 2 and args[0] in ("list", "trash") and args[1] in ("cache", "traces", "unclaimed", "virus"):
+    if len(args) >= 2 and args[0] in ("list", "trash") and args[1] in ("cache", "devcache", "traces", "unclaimed", "launchers", "virus"):
         if args[0] == "list" and len(args) == 2:
             sys.stdout.write(json.dumps(list_items(args[1]), separators=(",", ":")))
             return 0
