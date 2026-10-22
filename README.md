@@ -161,8 +161,9 @@ The Keepwell window makes no network requests. These things it starts do:
 
 ### What it writes
 
-Changes to your system happen only through the actions below: in a
-terminal after you confirm, or by moving what you tick to the Trash. The
+Changes to your system happen only through the actions below, after you
+confirm (in a terminal when a step needs your password), or by moving what
+you tick to the Trash. The
 privacy settings are listed under [Removing](#removing).
 
 Keepwell's own state lives in `~/.local/state/keepwell/`. Every path to it is
@@ -188,13 +189,27 @@ at 0600, written through a fresh temporary file and a rename.
 ## Actions
 
 Anything that installs software or changes the system goes through one
-script, `bin/keepwell-run`, in three steps:
+script, `bin/keepwell-run`, in three steps. Only actions with a step that
+needs your password use a terminal; the rest run inside Keepwell:
 
 1. **Confirm.** Keepwell shows what the action does and the exact commands,
    taken from `keepwell-run plan <action>` — the same table the terminal
    uses, so the dialog cannot show one thing and the terminal run another.
    Actions that install software offer a snapshot first.
-2. **Terminal.** Keepwell steps aside and opens a floating terminal
+2. **Run.** If no step uses `sudo` or an Omarchy command that asks for
+   your password (Empty Trash, Update Flatpak apps, Show failed services,
+   clearing only your own failed services, Do Not Track and debug symbol
+   lookups on their own), the sheet's button says **Run** and
+   `keepwell-run apply-here <action>` runs the same steps from Keepwell:
+   nothing is read from a keyboard, each program is checked the same way,
+   the first failure stops the rest, and the sheet shows what they printed
+   when a step fails or the output is the point (failed services). It plans
+   again first and runs nothing if the plan now needs root or differs in any
+   way from the one the sheet showed (the sheet passes the plan's SHA-256
+   digest).
+
+   Otherwise the button says **Open terminal**: Keepwell steps aside and
+   opens a floating terminal
    (`uwsm-app -- xdg-terminal-exec`, app-id `org.omarchy.terminal`) running
    `keepwell-run apply <action>`. It prints the commands again and waits for
    Enter; close the window to cancel. Each step runs from an absolute path
@@ -202,8 +217,8 @@ script, `bin/keepwell-run`, in three steps:
    stops the rest. Steps that need root use `sudo`, or an Omarchy command
    that calls it, so you type your password in the terminal — never in
    Keepwell. Nothing from the plugin's own directory runs as root.
-3. **Back.** When that terminal window closes, Keepwell comes back on the
-   same check, checks again and says what it found.
+3. **Back.** When the run ends, or that terminal window closes, Keepwell
+   checks again and says what it found, on the same check.
 
 | Action | Commands |
 |---|---|
@@ -213,7 +228,7 @@ script, `bin/keepwell-run`, in three steps:
 | Install UFW / Turn on the firewall | `omarchy pkg add ufw` (install only), `sudo ufw default deny incoming`, `sudo ufw default allow outgoing`, `sudo ufw enable` |
 | Deny incoming | `sudo ufw default deny incoming` |
 | Turn off the firewall | `sudo ufw disable` |
-| Update Flatpak apps | `flatpak update` (omarchy update doesn't) |
+| Update Flatpak apps | `flatpak update -y --noninteractive` (omarchy update doesn't; no password, Flatpak's own policy allows signed updates) |
 | Turn off SSH | `sudo systemctl disable --now sshd.service` |
 | Allow SSH keys only (offered once a key is in `~/.ssh/authorized_keys`) | writes `/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf` (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`), `sudo sshd -t` — if the test fails the file is removed again — then `sudo systemctl try-reload-or-restart sshd.service`. Open sessions stay open |
 | Allow SSH passwords again | removes that file, `sudo systemctl try-reload-or-restart sshd.service` |
@@ -226,7 +241,7 @@ script, `bin/keepwell-run`, in three steps:
 
 The cleanup sheet measures each option first (`paccache -d`, `pacman -Qtdq`,
 `journalctl --disk-usage`) and ticks only the safe ones; the commands update
-as you tick, and the terminal runs exactly the ticked set.
+as you tick, and exactly the ticked set runs.
 
 ### Privacy settings
 
@@ -409,8 +424,8 @@ opened without following symlinks, after a `.trashinfo` file reserves the
 name, so the entry moved is the one just checked. An item on another drive
 than your home isn't moved and is reported as not done. The space is freed when you empty the Trash
 (**Empty Trash** on Cleanup, shown while the Trash holds something; that
-step can't be undone, so it goes through the confirm sheet and a terminal
-like the other actions). Items are named by id, never by path: a cache item
+step can't be undone, so it goes through the confirm sheet like the other
+actions, and runs without a terminal since it needs no password). Items are named by id, never by path: a cache item
 must be a plain name directly inside `~/.cache` that you own, traces and
 developer caches come from fixed lists, unclaimed folders and broken
 launchers must still be found at that moment, and a flagged file must still

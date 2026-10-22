@@ -1,9 +1,11 @@
 import QtQuick
 import QtQuick.Layouts
 
-// The confirm step before anything runs in a terminal: what it does, the
-// exact commands (from keepwell-run's own plan, so they are the commands that
-// run), an optional snapshot first, and where the password is typed.
+// The confirm step before anything runs: what it does, the exact commands
+// (from keepwell-run's own plan, so they are the commands that run), an
+// optional snapshot first, and where the password is typed. A plan with a
+// step that needs sudo or a password runs in a terminal; any other runs
+// right here, and the sheet then shows how it went.
 Item {
   id: root
 
@@ -12,6 +14,8 @@ Item {
   property bool failed: false      // the plan couldn't be built
   property string context: ""      // "Security · Firewall"
   property bool snapshot: false
+  property bool running: false     // running here, without a terminal
+  property var result: null        // { done, output } once it has, when worth showing
 
   signal confirmed()
   signal canceled()
@@ -37,6 +41,9 @@ Item {
     for (var i = 0; i < plan.steps.length; i++) if (plan.steps[i].root) return true
     return false
   }
+  // No password anywhere in it, so no terminal.
+  readonly property bool here: hasSteps && !anyRoot
+  readonly property bool showResult: result !== null
 
   visible: opened
   // The cursor starts on "Open terminal" once the first plan (and so the
@@ -55,6 +62,8 @@ Item {
     if (top < flick.contentY) flick.contentY = top
     else if (bottom > flick.contentY + flick.height) flick.contentY = bottom - flick.height
   }
+  // The result replaces the commands: read from the top, Enter closes.
+  onResultChanged: if (result) { cursor = confirmIndex; flick.contentY = 0 }
   onPlanChanged: {
     if (!plan) return
     // From the plan itself: the bindings that count options may not have
@@ -119,14 +128,16 @@ Item {
             }
             KText {
               Layout.fillWidth: true
-              text: root.plan ? root.plan.title + "?" : root.failed ? "Couldn't prepare this action" : "Preparing…"
+              text: root.showResult ? (root.result.done ? root.plan.title : root.plan.title + " did not finish")
+                : root.plan ? root.plan.title + (root.running ? "…" : "?")
+                : root.failed ? "Couldn't prepare this action" : "Preparing…"
               font.pixelSize: Tokens.heading
               font.bold: true
               wrapMode: Text.WordWrap
             }
             KText {
               Layout.fillWidth: true
-              visible: text !== ""
+              visible: text !== "" && !root.showResult
               text: root.plan ? root.plan.summary : root.failed ? "Nothing was run. Try again in a moment." : ""
               color: Tokens.fg2
               wrapMode: Text.WordWrap
@@ -134,7 +145,7 @@ Item {
           }
 
           ColumnLayout {
-            visible: root.options.length > 0
+            visible: root.options.length > 0 && !root.showResult
             Layout.fillWidth: true
             spacing: Tokens.sp(10)
 
@@ -182,7 +193,7 @@ Item {
           }
 
           CheckBox {
-            visible: root.ready && root.plan.snapshotOffered
+            visible: root.ready && root.plan.snapshotOffered && !root.showResult
             Layout.fillWidth: true
             label: "Take a snapshot first"
             hint: "(a restore point you can boot into)"
@@ -200,11 +211,12 @@ Item {
           }
 
           ColumnLayout {
-            visible: root.hasSteps
+            visible: root.hasSteps && !root.showResult
             Layout.fillWidth: true
             spacing: Tokens.sp(6)
             KText {
-              text: "These exact commands will run in a terminal:"
+              text: root.running ? "Running these commands…"
+                : root.here ? "These exact commands will run:" : "These exact commands will run in a terminal:"
               font.pixelSize: Tokens.small
               color: Tokens.fg2
             }
@@ -271,10 +283,43 @@ Item {
             }
             KText {
               Layout.fillWidth: true
+              visible: !root.here
               text: "Keepwell steps aside while the terminal is open and comes back when you close it."
               font.pixelSize: Tokens.small
               color: Tokens.fg3
               wrapMode: Text.WordWrap
+            }
+          }
+
+          // What a run here printed: every command and its output, as text.
+          ColumnLayout {
+            visible: root.showResult
+            Layout.fillWidth: true
+            spacing: Tokens.sp(6)
+            KText {
+              Layout.fillWidth: true
+              text: root.showResult && root.result.done ? "Everything ran. What it printed:"
+                : "A step failed, so nothing after it ran. What it printed:"
+              font.pixelSize: Tokens.small
+              color: Tokens.fg2
+              wrapMode: Text.WordWrap
+            }
+            Rectangle {
+              Layout.fillWidth: true
+              implicitHeight: output.implicitHeight + Tokens.sp(24)
+              radius: Tokens.radius
+              color: Tokens.fill2
+              border.width: 1
+              border.color: Tokens.line
+              KText {
+                id: output
+                x: Tokens.sp(14)
+                y: Tokens.sp(12)
+                width: parent.width - Tokens.sp(28)
+                text: root.showResult ? (root.result.output || "(nothing)") : ""
+                font.pixelSize: Tokens.caption
+                wrapMode: Text.WrapAnywhere
+              }
             }
           }
 
@@ -286,17 +331,18 @@ Item {
         spacing: Tokens.sp(8)
         Item { Layout.fillWidth: true }
         ActionButton {
-          label: "Cancel"
+          visible: !root.showResult
+          label: root.running ? "Hide" : "Cancel"
           hasCursor: root.cursor === root.cancelIndex
           onActivated: root.canceled()
         }
         ActionButton {
-          label: "Open terminal"
+          label: root.showResult ? "Close" : root.running ? "Running…" : root.here ? "Run" : "Open terminal"
           primary: true
-          elevated: true
-          enabledAction: root.hasSteps
+          elevated: !root.here && !root.showResult
+          enabledAction: root.showResult || (root.hasSteps && !root.running)
           hasCursor: root.cursor === root.confirmIndex
-          onActivated: root.confirmed()
+          onActivated: root.showResult ? root.canceled() : root.confirmed()
         }
       }
     }
@@ -304,6 +350,8 @@ Item {
 
   // Keys while open, forwarded from the window's key handler.
   function activate(i) {
+    if (root.showResult) { root.canceled(); return }
+    if (root.running && i !== root.cancelIndex) return
     if (root.hasAll && i === 0) root.allToggled()
     else if (i < root.boxIndex) root.optionToggled(root.options[i - root.first].id)
     else if (i === root.boxIndex) root.snapshotToggled()
@@ -319,6 +367,8 @@ Item {
       return Math.max(0, Math.min(root.confirmIndex, next))
     }
     if (event.key === Qt.Key_Escape) root.canceled()
+    else if (root.showResult && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) root.canceled()
+    else if (root.showResult) return false
     else if (event.key === Qt.Key_Up || event.key === Qt.Key_Left || event.key === Qt.Key_Backtab
              || event.key === Qt.Key_K || event.key === Qt.Key_H) root.cursor = step(-1)
     else if (event.key === Qt.Key_Down || event.key === Qt.Key_Right || event.key === Qt.Key_Tab

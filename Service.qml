@@ -20,8 +20,10 @@ import "model/Status.js" as Status
 // timer.
 //
 // Actions that change the system go through bin/keepwell-run: its plan is
-// shown in the confirm sheet, then it runs in a visible terminal while the
-// window steps aside, and the window comes back when that terminal closes.
+// shown in the confirm sheet. A plan with a step that needs sudo or a
+// password runs in a visible terminal while the window steps aside, and the
+// window comes back when that terminal closes; any other plan runs right
+// here, and the sheet says how it went.
 Scope {
   id: root
 
@@ -193,12 +195,18 @@ Scope {
   property var confirmChosen: null    // option ids; null until the first plan
   property var pendingAct: null       // { act, checkId }
   property bool planDirty: false
+  // A plan run without a terminal: running, then its result (keepwell-run
+  // apply-here JSON) while the sheet shows it.
+  readonly property bool confirmRunning: runner.running
+  property var confirmResult: null
+  property var running: null          // { act, checkId, title } while it runs
 
   function say(text) { if (windowLoader.item) windowLoader.item.notice = text }
 
   function requestAction(action, checkId, context) {
     if (!action || action.disabled) return
     if (terminal) { say("Finish the open Keepwell terminal first."); return }
+    if (action.act && running) { say("Wait for “" + running.title + "” to finish."); return }
     if (action.run === "network") { say(""); check(true); return }
     if (action.launch) { launch(action.launch); return }
     if (action.act) { openConfirm(action.act, checkId, context); return }
@@ -255,12 +263,13 @@ Scope {
     confirmContext = context
     confirmSnapshot = false
     confirmChosen = null
+    confirmResult = null
     confirmOpen = true
     fetchPlan()
   }
 
   function fetchPlan() {
-    if (!pendingAct) return
+    if (!pendingAct || running) return
     confirmPlan = null
     confirmFailed = false
     if (planner.running) { planDirty = true; return }
@@ -276,14 +285,14 @@ Scope {
   }
 
   function toggleAllOptions() {
-    if (!confirmPlan || confirmChosen === null) return
+    if (!confirmPlan || confirmChosen === null || running) return
     var all = confirmPlan.options.map(function(o) { return o.id })
     confirmChosen = confirmChosen.length === all.length ? [] : all
     fetchPlan()
   }
 
   function toggleOption(id) {
-    if (!confirmPlan || confirmChosen === null) return
+    if (!confirmPlan || confirmChosen === null || running) return
     var next = confirmChosen.slice()
     var at = next.indexOf(id)
     if (at === -1) next.push(id)
@@ -297,6 +306,7 @@ Scope {
         || typeof p.summary !== "string" || !Array.isArray(p.steps) || p.steps.length > 20
         || !Array.isArray(p.options) || p.options.length > 20) return false
     if (p.steps.length === 0 && p.options.length === 0) return false
+    if (typeof p.digest !== "string" || !/^[0-9a-f]{64}$/.test(p.digest)) return false
     for (var j = 0; j < p.options.length; j++) {
       var o = p.options[j]
       if (!o || !/^[a-z0-9]{1,24}$/.test(o.id) || typeof o.label !== "string"
@@ -329,7 +339,7 @@ Scope {
   }
 
   function toggleSnapshot() {
-    if (!confirmPlan || !confirmPlan.snapshotOffered) return
+    if (!confirmPlan || !confirmPlan.snapshotOffered || running) return
     confirmSnapshot = !confirmSnapshot
     fetchPlan()
   }
@@ -337,6 +347,58 @@ Scope {
   function cancelConfirm() {
     confirmOpen = false
     pendingAct = null
+    confirmResult = null
+    if (running) say("“" + running.title + "” is still running; Keepwell will say here when it's done.")
+  }
+
+  // ---------------- without a terminal ----------------
+  // No step needs root or a password, so nothing is typed anywhere: the
+  // runner re-plans, refuses a plan that now needs root or differs at all
+  // from the one the sheet showed (by its digest), runs it and hands back
+  // what it printed.
+  function runHere() {
+    if (runner.running) return
+    running = { act: pendingAct.act, checkId: pendingAct.checkId, title: confirmPlan.title,
+                showOutput: confirmPlan.showOutput === true }
+    confirmResult = null
+    runner.start(python.concat([sourceDir + "/bin/keepwell-run", "apply-here", pendingAct.act, confirmPlan.digest],
+                               runFlags()))
+  }
+
+  BoundedProcess {
+    id: runner
+    maxBytes: 64 * 1024
+    // Each step has half an hour; a Flatpak update can take a while.
+    timeoutMs: 2 * 3600 * 1000
+    onFinished: function(ok, text) {
+      var r = root.running
+      root.running = null
+      var d = null
+      if (ok) { try { d = JSON.parse(text) } catch (e) { d = null } }
+      var valid = d && d.id === r.act && (d.refused === "root" || d.refused === "changed"
+        || (typeof d.failed === "number" && typeof d.output === "string" && d.output.length <= 32 * 1024))
+      var open = root.confirmOpen && root.pendingAct && root.pendingAct.act === r.act
+      if (valid && d.refused) {
+        // The system changed since the plan, so nothing ran; show the new one.
+        var why = d.refused === "root" ? "it now needs your password, so it runs in a terminal."
+                                       : "what it would do changed. Check the commands again."
+        if (open) { root.say("Nothing ran: " + why); root.fetchPlan() }
+        else root.say("“" + r.title + "” didn't run: " + why)
+        return
+      }
+      var done = valid && d.failed === 0
+      var line = !valid ? "Something went wrong running “" + r.title + "”."
+        : done ? "Done: " + r.title + "." : "“" + r.title + "” did not finish (step " + d.failed + ")."
+      if (open && (!done || r.showOutput))
+        root.confirmResult = { done: done, output: valid ? d.output : "" }
+      else if (open) {
+        root.confirmOpen = false
+        root.pendingAct = null
+      }
+      root.say(line + " Checking the result…")
+      root.reportAfterCheck = { checkId: r.checkId, prefix: line + " " }
+      root.check(false)
+    }
   }
 
   // ---------------- moving things to Trash ----------------
@@ -548,7 +610,8 @@ Scope {
   readonly property var networkActs: ["install-arch-audit", "update"]
 
   function acceptConfirm() {
-    if (!confirmPlan || !pendingAct || terminal || confirmPlan.steps.length === 0) return
+    if (!confirmPlan || !pendingAct || terminal || running || confirmPlan.steps.length === 0) return
+    if (!confirmPlan.steps.some(function(s) { return s.root })) { runHere(); return }
     var title = "Keepwell · " + confirmPlan.title
     var argv = ["/usr/bin/uwsm-app", "--", "/usr/bin/xdg-terminal-exec",
                 "--app-id=org.omarchy.terminal", "--title=" + title, "-e"]
@@ -816,6 +879,8 @@ Scope {
       item.confirmFailed = Qt.binding(function() { return root.confirmFailed })
       item.confirmSnapshot = Qt.binding(function() { return root.confirmSnapshot })
       item.confirmContext = Qt.binding(function() { return root.confirmContext })
+      item.confirmRunning = Qt.binding(function() { return root.confirmRunning })
+      item.confirmResult = Qt.binding(function() { return root.confirmResult })
       item.confirmAccepted.connect(root.acceptConfirm)
       item.confirmCanceled.connect(root.cancelConfirm)
       item.confirmSnapshotToggled.connect(root.toggleSnapshot)

@@ -85,8 +85,9 @@ function check(base, fields) {
   return c
 }
 
-// act: an action id in bin/keepwell-run (opens the confirm sheet, then a
-// terminal). launch: a desktop entry to open. run: "network" re-runs checks
+// act: an action id in bin/keepwell-run (opens the confirm sheet, then runs
+// in a terminal if a step needs a password, in Keepwell if not); elevated
+// marks the ones that use the terminal. launch: a desktop entry to open. run: "network" re-runs checks
 // with arch-audit. None of these: arrives in a later build.
 function install(label, act) { return { label: label, primary: true, elevated: true, act: act } }
 
@@ -565,7 +566,7 @@ function apps(p, net) {
   var list = p.apps || []
   var dnt = fact("Do Not Track signal", net && net.doNotTrack ? "Sent to tools that honour it" : "Not set",
     owner(false, net && net.doNotTrackKeepwell, "session"))
-  var dntAction = net && net.doNotTrack ? [] : [{ label: "Turn on Do Not Track…", elevated: true, act: "privacy" }]
+  var dntAction = net && net.doNotTrack ? [] : [{ label: "Turn on Do Not Track…", act: "privacy" }]
   if (list.length === 0) return check(b, { kind: "good", status: "No known reporting apps installed",
     meta: "Arch itself sends nothing", facts: [dnt], actions: dntAction })
   var facts = [], on = 0, actions = []
