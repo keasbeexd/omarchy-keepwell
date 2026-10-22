@@ -412,15 +412,17 @@ def _last_scan():
     log = raw.decode("utf-8", "replace")
     out = {"at": int(name[:10]), "target": "home" if name.endswith("-home.log") else "downloads",
            "finished": "----------- SCAN SUMMARY -----------" in log}
+    tail = keepwell_av.summary(log)      # only clamscan's own final summary
     for key, field in (("Scanned files", "files"), ("Infected files", "infected")):
-        m = re.search(r"(?m)^" + key + r": (\d+)$", log)
+        m = re.search(r"(?m)^" + key + r": (\d+)$", tail)
         if m:
             out[field] = int(m.group(1))
     shown, hidden = keepwell_av.split(keepwell_av.findings(log))
     out["found"] = [clean(path.replace(HOME, "~", 1), 160) for path, _ in shown][:20]
     out["allowedFound"] = len(hidden)
     if "infected" in out:
-        out["infected"] = max(0, out["infected"] - len(hidden))
+        # The summary can never say fewer than the files named as found.
+        out["infected"] = max(out["infected"] - len(hidden), len(shown))
     return out
 
 
@@ -883,6 +885,21 @@ def probe_failed():
     return {"units": units[:30]}
 
 
+FINDINGS_BUDGET = 16 * 1024      # bytes of JSON per scanner's findings
+
+
+def _fit(items, budget):
+    """(items that fit in budget bytes of JSON, how many were left out)."""
+    out, used = [], 2
+    for it in items:
+        n = len(json.dumps(it, separators=(",", ":"))) + 1
+        if used + n > budget:
+            break
+        out.append(it)
+        used += n
+    return out, len(items) - len(out)
+
+
 def probe_tools():
     p = {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
     if p["gitleaks"]:
@@ -895,6 +912,8 @@ def probe_tools():
         except (OSError, ValueError):
             last = None
         if last and isinstance(last.get("at"), int):
+            if isinstance(last.get("findings"), list):
+                last["findings"], last["truncated"] = _fit(last["findings"], FINDINGS_BUDGET)
             p["leaks"] = last
     if p["osvScanner"]:
         p["osvScanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-osv.service"],
@@ -906,7 +925,7 @@ def probe_tools():
         except (OSError, ValueError):
             osv = None
         if osv and isinstance(osv.get("at"), int) and isinstance(osv.get("findings"), list):
-            osv["findings"] = osv["findings"][:100]
+            osv["findings"], osv["truncated"] = _fit(osv["findings"][:100], FINDINGS_BUDGET)
             p["osv"] = osv
     return p
 
@@ -1072,6 +1091,16 @@ def main():
             probes[name] = {"error": True}
     doc = json.dumps({"v": 1, "at": int(time.time()), "network": bool(network), "probes": probes},
                      separators=(",", ":"), ensure_ascii=True)
+    # Never print nothing: a document that is too big loses its largest
+    # probes (they become {"skipped": true}), not the whole report.
+    while len(doc) > OUT_LIMIT and probes:
+        biggest = max((k for k in probes if probes[k] != {"skipped": True}),
+                      key=lambda k: len(json.dumps(probes[k])), default=None)
+        if biggest is None:
+            break
+        probes[biggest] = {"skipped": True}
+        doc = json.dumps({"v": 1, "at": int(time.time()), "network": bool(network), "probes": probes},
+                         separators=(",", ":"), ensure_ascii=True)
     if len(doc) > OUT_LIMIT:
         sys.exit(3)
     sys.stdout.write(doc)

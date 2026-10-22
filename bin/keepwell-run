@@ -87,12 +87,13 @@ DISPLAY_ENV = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DES
                "DBUS_SESSION_BUS_ADDRESS", "XCURSOR_SIZE", "XCURSOR_THEME", "GTK_THEME", "HOME", "LANG")
 
 
-def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,), failed=""):
+def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,), failed="", extra_env=None):
     """stdout of argv as text, or "" on failure, overrun or overflow. ok_codes:
     exit codes that count as success (some scanners exit 1 when they find
     something). failed: what to return when it didn't work — pass None
     where "no output" and "couldn't run" must not be confused."""
     env = {"PATH": "/usr/bin", "LC_ALL": "C"}
+    env.update(extra_env or {})
     # `systemctl --user` reaches your session's service manager through these.
     env.update({k: os.environ[k] for k in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS") if k in os.environ})
     if gui:
@@ -922,14 +923,17 @@ def _progress(kind, started, done, total):
         pass
 
 
-def _count_files(root, skip, seconds=30.0):
-    """Regular files under root that clamscan will reach (it follows no
-    symlinks below the folder it's given), or None if counting takes too
-    long."""
-    n, stack, deadline = 0, [root], time.monotonic() + seconds
+CONTROL = re.compile(rb"[\x00-\x1f\x7f]")
+
+
+def _list_files(root, skip, out):
+    """Writes the regular files under root that clamscan should read (it
+    follows no symlinks below the folder it's given) to out, one path per
+    line, and returns (listed, unscannable). A path with a line break or
+    other control character is never listed: clamscan echoes paths verbatim,
+    so such a name could write lines of its own into the scan log."""
+    listed, odd, stack = 0, 0, [root]
     while stack:
-        if time.monotonic() > deadline:
-            return None
         try:
             with os.scandir(stack.pop()) as it:
                 for e in it:
@@ -938,31 +942,38 @@ def _count_files(root, skip, seconds=30.0):
                             if e.path not in skip:
                                 stack.append(e.path)
                         elif e.is_file(follow_symlinks=False):
-                            n += 1
+                            raw = os.fsencode(e.path)
+                            if CONTROL.search(raw):
+                                odd += 1
+                            else:
+                                out.write(raw + b"\n")
+                                listed += 1
                     except OSError:
                         continue
         except OSError:
             continue
-    return n
+    return listed, odd
 
 
 def clam_scan(target):
-    """Runs inside the background unit. Counts the files first, then runs
-    clamscan --verbose and counts its "Scanning <file>" lines as it goes.
-    Those lines are left out of the log, which keeps only what --log would
-    have: the files found and the summary."""
+    """Runs inside the background unit. Lists the files first, then runs
+    clamscan --verbose over exactly that list and counts its "Scanning
+    <file>" lines as it goes. Those lines are left out of the log, which
+    keeps only what --log would have: the files found and the summary."""
     path = os.path.join(HOME, "Downloads") if target == "downloads" else HOME
     skip = [os.path.join(HOME, sub) for sub in CLAM_SKIP] if target == "home" else []
     started = int(time.time())
     _progress("clamscan", started, 0, None)
-    total = _count_files(path, skip)
+    listfile = keepwell_state.new_filelist(target)
+    lfd = os.open(listfile, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(lfd, "wb") as lst:
+        total, odd = _list_files(path, skip, lst)
     _progress("clamscan", started, 0, total)
     log = keepwell_state.new_log(target)
-    argv = ["/usr/bin/clamscan", "--recursive", "--infected", "--verbose"]
-    argv += ["--exclude-dir=^" + re.escape(sub) + "(/|$)" for sub in skip]
+    argv = ["/usr/bin/clamscan", "--infected", "--verbose", "--file-list=" + listfile]
     fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(fd, "wb", buffering=0) as out:
-        proc = subprocess.Popen(argv + ["--", path], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, env={"PATH": "/usr/bin", "HOME": HOME, "LC_ALL": "C"})
         done, said = 0, time.monotonic()
         for line in proc.stdout:
@@ -974,6 +985,8 @@ def clam_scan(target):
                 continue
             out.write(line[:4096])
         rc = proc.wait()
+        if odd:
+            out.write(b"Keepwell: %d file(s) with control characters in their names were not scanned\n" % odd)
     # 0 nothing found, 1 something found; anything else is clamscan's error.
     return 0 if rc in (0, 1) else rc
 
@@ -1141,10 +1154,12 @@ def _plain(text_value, limit):
 
 def _infected(log):
     """Infected files in a finished scan log, less those marked as not a
-    threat whose contents haven't changed."""
-    bad = re.search(r"(?m)^Infected files: (\d+)$", log)
+    threat whose contents haven't changed. Only clamscan's final summary
+    counts, and it can never say fewer than the files named as found."""
+    bad = re.search(r"(?m)^Infected files: (\d+)$", keepwell_av.summary(log))
     n = int(bad.group(1)) if bad else 0
-    return max(0, n - len(keepwell_av.split(keepwell_av.findings(log))[1]))
+    shown, hidden = keepwell_av.split(keepwell_av.findings(log))
+    return max(n - len(hidden), len(shown))
 
 
 def notify(kind, quiet=False):
@@ -1251,9 +1266,15 @@ def leaks_scan(root):
     findings, scanned, failed = [], 0, 0
     for n, repo in enumerate(repos):
         _progress("gitleaks", started, n, len(repos))
+        # The repository is untrusted: its own diff drivers (textconv, external
+        # diff) would run a command from its .git/config, so git is told not to
+        # use them and reads no user or system config.
         out = capture(["/usr/bin/gitleaks", "git", "--no-banner", "--redact", "--log-level", "error",
+                       "--log-opts=--no-textconv --no-ext-diff",
                        "--report-format", "json", "--report-path", "-", "--exit-code", "0",
-                       "--timeout", "300", "--", repo], timeout=320, cap=16 << 20)
+                       "--timeout", "300", "--", repo], timeout=320, cap=16 << 20,
+                      extra_env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                                 "GIT_ATTR_NOSYSTEM": "1"})
         try:
             items = json.loads(out) if out.strip() else []
         except ValueError:
@@ -1268,7 +1289,7 @@ def leaks_scan(root):
                 continue
             findings.append({
                 "repo": rel[:120] if rel != "." else os.path.basename(root)[:120],
-                "file": str(it.get("File", ""))[:160],
+                "file": re.sub(r"[\x00-\x1f\x7f]", "", str(it.get("File", "")))[:160],
                 "line": it.get("StartLine") if isinstance(it.get("StartLine"), int) else 0,
                 "rule": re.sub(r"[^A-Za-z0-9_.-]", "", str(it.get("RuleID", "")))[:48],
                 "commit": re.sub(r"[^0-9a-f]", "", str(it.get("Commit", "")))[:8],

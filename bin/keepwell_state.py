@@ -11,6 +11,7 @@ What lives here:
                       restart, e.g. during `omarchy update`)
   gitleaks.json       the last secrets scan: counts and locations, redacted
   clamav/*.log        ClamAV scan logs, the newest ten kept
+  clamav/filelist-*.txt  the files the running scan was told to read
 """
 
 import json
@@ -190,6 +191,25 @@ def new_log(kind, keep=10):
                 pass
         import time
         name = "%010d-%s.log" % (int(time.time()), kind)
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+        os.close(fd)
+        return os.path.join(os.path.expanduser("~"), *PARTS, "clamav", name)
+    finally:
+        os.close(dirfd)
+
+
+def new_filelist(kind):
+    """Create an empty, private file for the list of files a scan will read,
+    replacing the previous one, and return its path."""
+    if kind not in ("home", "downloads"):
+        raise ValueError("bad kind")
+    dirfd = open_dir("clamav")
+    name = "filelist-%s.txt" % kind
+    try:
+        try:
+            os.unlink(name, dir_fd=dirfd)
+        except FileNotFoundError:
+            pass
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
         os.close(fd)
         return os.path.join(os.path.expanduser("~"), *PARTS, "clamav", name)

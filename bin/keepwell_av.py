@@ -27,6 +27,13 @@ HASH_CAP = 512 << 20           # larger files are never treated as allowed
 FOUND = re.compile(r"(?m)^(/.+): ([^:\n]+) FOUND$")
 
 
+def summary(log):
+    """Just clamscan's final SCAN SUMMARY block, so no earlier line can
+    answer for it."""
+    marker = "----------- SCAN SUMMARY -----------"
+    return log.rsplit(marker, 1)[1] if marker in log else ""
+
+
 def findings(log):
     """[(path, signature)] named in a scan log, at most 50, in log order."""
     out = []

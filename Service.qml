@@ -57,7 +57,7 @@ Scope {
   }
   // A missed scheduled run raises the shield to "Review" like a check would.
   readonly property bool anyMissed: schedules.missed.length > 0
-  readonly property string worst: !doc ? "good"
+  readonly property string worst: !doc ? (failed ? "attn" : "good")
     : Status.worst(allChecks) === "crit" ? "crit" : anyMissed ? "attn" : Status.worst(allChecks)
   readonly property string summary: anyMissed
     ? "scheduled deep scan missed"
