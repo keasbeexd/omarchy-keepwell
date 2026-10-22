@@ -340,3 +340,35 @@ def remove_unit(name):
             os.unlink(name, dir_fd=dirfd)
     finally:
         os.close(dirfd)
+
+
+# ---------------------------------------------------------------- other folders in your home
+#
+# Folders Keepwell works in but doesn't own (the Trash, the folder an item
+# is moved out of). Same walk as above; their permissions are left alone.
+
+def open_home_dir(parts, create=False):
+    """A held descriptor for ~/<parts...>, every component opened without
+    following symlinks and checked to be a directory you own. Missing
+    components are made at 0700 when create is True; otherwise
+    FileNotFoundError."""
+    fd = os.open(os.path.expanduser("~"), DIR_FLAGS)
+    try:
+        _check_dir(fd, False)
+        for name in parts:
+            if name in ("", ".", "..") or "/" in name:
+                raise ValueError("bad path component")
+            try:
+                nfd = os.open(name, DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(name, 0o700, dir_fd=fd)
+                nfd = os.open(name, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+            _check_dir(fd, False)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise

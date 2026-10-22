@@ -58,6 +58,7 @@ import signal
 import stat
 import subprocess
 import sys
+import urllib.parse
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -1147,8 +1148,9 @@ def osv_scan(root):
 
 def _plain(text_value, limit):
     """Notification bodies are markup to the notification daemon: no tags,
-    no entities, no control characters, and short."""
-    text_value = re.sub(r"[\x00-\x1f\x7f<>&]", "", text_value)
+    no entities, no control or text-direction characters, and short."""
+    text_value = keepwell_unclaimed.UNSAFE_TEXT.sub("", text_value)
+    text_value = re.sub(r"[<>&]", "", text_value)
     return text_value[:limit]
 
 
@@ -1714,20 +1716,78 @@ def list_items(which):
     return {"set": which, "items": items}
 
 
+TRASH_PARTS = (".local", "share", "Trash")
+
+
+def _trash_one(path):
+    """Moves one item into your Trash (the freedesktop.org layout gio and the
+    file manager use, so it restores from there as usual). The move is one
+    rename between held folder descriptors: no symlink on either side is
+    followed, and the entry moved is the one just checked. False when that
+    can't be done, including an item on another drive (a rename can't cross
+    drives; nothing is copied instead)."""
+    rel = os.path.relpath(path, HOME)
+    parts = rel.split(os.sep)
+    if os.path.isabs(rel) or any(p in ("", ".", "..") for p in parts):
+        return False
+    name = parts[-1]
+    src = files = info = None
+    try:
+        src = keepwell_state.open_home_dir(parts[:-1])
+        before = os.stat(name, dir_fd=src, follow_symlinks=False)
+        if before.st_uid != os.geteuid():
+            return False
+        files = keepwell_state.open_home_dir(TRASH_PARTS + ("files",), create=True)
+        info = keepwell_state.open_home_dir(TRASH_PARTS + ("info",), create=True)
+        # The .trashinfo file, created exclusively, reserves the name in the
+        # Trash; that is how the spec keeps two programs from taking the same one.
+        for n in range(1, 1000):
+            slot = name if n == 1 else "%s.%d" % (name, n)
+            try:
+                os.stat(slot, dir_fd=files, follow_symlinks=False)
+                continue
+            except FileNotFoundError:
+                pass
+            try:
+                ifd = os.open(slot + ".trashinfo", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              0o600, dir_fd=info)
+            except FileExistsError:
+                continue
+            break
+        else:
+            return False
+        try:
+            view = memoryview(("[Trash Info]\nPath=%s\nDeletionDate=%s\n"
+                               % (urllib.parse.quote(path, safe="/"), time.strftime("%Y-%m-%dT%H:%M:%S"))).encode())
+            while view:
+                view = view[os.write(ifd, view):]
+            os.fsync(ifd)
+        finally:
+            os.close(ifd)
+        try:
+            os.rename(name, slot, src_dir_fd=src, dst_dir_fd=files)
+        except OSError:
+            os.unlink(slot + ".trashinfo", dir_fd=info)
+            return False
+        os.fsync(files)
+        os.fsync(src)
+        moved = os.stat(slot, dir_fd=files, follow_symlinks=False)
+        # Replaced between the check and the move: it's in the Trash and can
+        # be restored, but it isn't what you ticked, so it isn't reported done.
+        return (moved.st_dev, moved.st_ino) == (before.st_dev, before.st_ino)
+    except (OSError, ValueError):
+        return False
+    finally:
+        for fd in (src, files, info):
+            if fd is not None:
+                os.close(fd)
+
+
 def trash(which, ids):
     done, failed = [], []
     for item in ids[:100]:
         path = resolve(which, item)
-        if not path:
-            failed.append(item)
-            continue
-        out = subprocess.call(["/usr/bin/gio", "trash", "--", path], stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              env={"PATH": "/usr/bin", "HOME": HOME,
-                                   "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", ""),
-                                   "DBUS_SESSION_BUS_ADDRESS": os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")},
-                              timeout=60)
-        (done if out == 0 else failed).append(item)
+        (done if path and _trash_one(path) else failed).append(item)
     return {"set": which, "trashed": done, "failed": failed}
 
 

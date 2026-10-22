@@ -60,6 +60,10 @@ STANDARD = {
 
 SKIP_NAMES = {".config", ".local", ".cache"}
 
+# C0 and C1 controls and the characters that reorder text on screen, so a
+# name can't break a line or show itself backwards.
+UNSAFE_TEXT = re.compile("[\x00-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]")
+
 
 def norm(name):
     return re.sub(r"[^a-z0-9]", "", name.lower())
@@ -101,6 +105,32 @@ def _names(directory, limit=20000):
         return []
 
 
+def _read_regular(path, cap, owner=None):
+    """(bytes, stat) of a regular file read through one descriptor, or None:
+    a symlink, a FIFO or other special file, a file owned by someone other
+    than owner (when given) or one larger than cap is refused, not cut short."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap or (owner is not None and st.st_uid != owner):
+            return None
+        os.set_blocking(fd, True)
+        data = b""
+        while len(data) <= cap:
+            chunk = os.read(fd, cap + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return (data, st) if len(data) <= cap else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def _omarchy_mentions(budget_bytes=24 << 20):
     """Folder names Omarchy's own scripts and configs refer to under
     .config or .local/share. Text files only, bounded."""
@@ -111,18 +141,13 @@ def _omarchy_mentions(budget_bytes=24 << 20):
         for f in files:
             if f.endswith((".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".ttf", ".otf", ".woff2")):
                 continue
-            path = os.path.join(root, f)
-            try:
-                st = os.lstat(path)
-                if not stat.S_ISREG(st.st_mode) or st.st_size > 512 * 1024:
-                    continue
-                if used + st.st_size > budget_bytes:
-                    return found
-                with open(path, "rb") as fh:
-                    data = fh.read(512 * 1024)
-                used += len(data)
-            except OSError:
+            got = _read_regular(os.path.join(root, f), 512 * 1024)
+            if got is None:
                 continue
+            data = got[0]
+            if used + len(data) > budget_bytes:
+                return found
+            used += len(data)
             found.update(m.group(1).decode() for m in pattern.finditer(data))
     return found
 
@@ -398,14 +423,16 @@ def broken_launchers():
                     stack.append((item, depth + 1))
                 if not stat.S_ISREG(st.st_mode) or not _valid_launcher_id(item):
                     continue
-                try:
-                    with open(path, "rb") as fh:
-                        keys = _desktop_keys(fh.read(64 * 1024))
-                except OSError:
+                # The listing above only chose the name; what is read is
+                # whatever that name is now, checked again on its descriptor.
+                got = _read_regular(path, 64 * 1024, owner=UID)
+                if got is None:
                     continue
+                data, st = got
+                keys = _desktop_keys(data)
                 why = why_broken(keys, dirs)
                 if why:
-                    label = re.sub(r"[\x00-\x1f\x7f]", "", keys.get("Name", "") or name[:-8])[:80]
+                    label = UNSAFE_TEXT.sub("", keys.get("Name", "") or name[:-8])[:80]
                     out.append({"id": item, "path": "~/" + item, "label": label + " — " + why,
                                 "bytes": st.st_blocks * 512})
     return out[:60]
