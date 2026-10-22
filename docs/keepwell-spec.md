@@ -20,7 +20,7 @@ It is deliberately **a frontend and coordinator, not a toolkit**. Wherever a mai
 
 - **Never reinvent a wheel that exists.** One tile per standard tool; Keepwell orchestrates, the tool does the work.
 - **Never leave the platform unnecessarily.** Settings that the counterpart app owns are changed through (or displayed from) that app's own config; only tools with no scheduling/config mechanism use Keepwell's own.
-- **Nothing destructive without a preview and explicit consent.** Every removal shows exactly what goes, with sizes, before it happens. Recoverable actions preferred (`gio trash` over `rm`).
+- **Nothing destructive without a preview and explicit consent.** Every removal shows exactly what goes, with sizes, before it happens. Recoverable actions preferred (the Trash over `rm`).
 - **Nothing runs in the background unless the user turns it on.** All timers off by default.
 - **Privileged steps run in a visible terminal** showing the exact commands — never hidden `pkexec`, never code elevated from the checkout (marketplace hard requirements).
 - **Honest claims.** README, manifest, and behavior must match exactly; every external endpoint disclosed. No fear-mongering; antivirus on Linux is framed honestly.
@@ -43,7 +43,7 @@ A panel widget with three tabs (Security / Privacy / System Care), each a Window
 | Camera/mic | PipeWire | read-only indicators |
 | Browser telemetry | Chromium/Firefox prefs | posture display + confirmed, validated toggles |
 | App telemetry | per-app opt-outs | reporter card + safe toggles / guided links |
-| Activity traces | GTK/shell standard files | checkbox cleaner, `gio trash` |
+| Activity traces | GTK/shell standard files | checkbox cleaner, move to Trash |
 | Package cleanup | paccache / pacman | scan, size preview, execute in visible terminal |
 | Unclaimed files | — (no tool exists) | **the one new wheel** — see §5.3 |
 | Cache | `~/.cache` breakdown | select-and-trash |
@@ -116,7 +116,7 @@ Chromium first (Omarchy default), Firefox second. Design:
 ### 4.5 Activity traces cleaner
 
 - Checkbox list: `~/.recently-used` (GTK recent files), shell history, `~/.thumbnails`, trash.
-- Per-item confirmation; deletion via `gio trash` only (recoverable); never automated or bundled into timers.
+- Per-item confirmation; deletion by moving to the Trash only (recoverable); never automated or bundled into timers.
 
 ---
 
@@ -151,7 +151,7 @@ For "files nothing claims anymore" that no existing GUI tool handles well:
 - Candidate rules: **not owned by any package** AND mtime age ≥ threshold AND not matched by the ignore list (plugin state, browser profile internals, `node_modules`, `.local/share/pipx`, etc.).
 - **Adjustable:** site-wide age threshold slider (default 180 days) + per-folder overrides. "Suggest + trash + adjustable" policy per user decision.
 - **Presentation:** candidates only — "verify before removing" copy, each row shows path / size / last-modified / owning-package ("none"). Nothing is deleted automatically, ever.
-- **Deletion:** per-item or multi-select, through `gio trash` only (recoverable). New-appearing config dirs are exactly why nothing runs unattended.
+- **Deletion:** per-item or multi-select, by moving to the Trash only (recoverable). New-appearing config dirs are exactly why nothing runs unattended.
 
 ### 5.4 Disk usage
 

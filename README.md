@@ -402,8 +402,12 @@ App caches (folders directly inside `~/.cache`, thumbnails included),
 developer caches, activity traces (the recent-files list, `~/.bash_history`,
 `~/.cache/thumbnails`), unclaimed folders and broken launchers are cleared
 without root or a terminal. A sheet lists every item with its size, nothing
-ticked; what you tick is moved with `gio trash`, one item at a time, so it
-can be restored from the Trash. The space is freed when you empty the Trash
+ticked; what you tick is moved to `~/.local/share/Trash`, one item at a
+time, so it can be restored from the Trash like anything else there. Keepwell
+moves it itself rather than through `gio trash`: one rename between folders
+opened without following symlinks, after a `.trashinfo` file reserves the
+name, so the entry moved is the one just checked. An item on another drive
+than your home isn't moved and is reported as not done. The space is freed when you empty the Trash
 (**Empty Trash** on Cleanup, shown while the Trash holds something; that
 step can't be undone, so it goes through the confirm sheet and a terminal
 like the other actions). Items are named by id, never by path: a cache item
