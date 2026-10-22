@@ -38,6 +38,8 @@ Item {
   property bool confirmFailed: false
   property bool confirmSnapshot: false
   property string confirmContext: ""
+  property bool confirmRunning: false
+  property var confirmResult: null
   signal confirmAccepted()
   signal confirmCanceled()
   signal confirmSnapshotToggled()
@@ -510,6 +512,8 @@ Item {
           failed: root.confirmFailed
           snapshot: root.confirmSnapshot
           context: root.confirmContext
+          running: root.confirmRunning
+          result: root.confirmResult
           onConfirmed: root.confirmAccepted()
           onCanceled: root.confirmCanceled()
           onSnapshotToggled: root.confirmSnapshotToggled()
