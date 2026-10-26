@@ -1,19 +1,54 @@
 # Keepwell
 
-*Keep your system well.*
+Security, privacy and system care for Omarchy, in one window and in plain
+language. Every colour the window draws comes from your active Omarchy theme.
+
+<img src="docs/logo.svg" width="96" alt="Keepwell's shield with a check mark, in 16 EGA colours">
 
 ![Keepwell's window, framed in a Turbo Pascal-style screen](preview.png)
 
-An Omarchy shell plugin that brings security, privacy and system care into one
-window, for people new to Linux. Keepwell is a frontend and a coordinator, not
+Keepwell is for people new to Linux. It is a frontend and a coordinator, not
 a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
-arch-audit, Flatseal, Snapper…), Keepwell shows its state in plain language and
-hands you to it. The full design is in [docs/keepwell-spec.md](docs/keepwell-spec.md).
+arch-audit, Flatseal, Snapper...), Keepwell shows its state in plain language
+and hands you to it. The full design is in
+[docs/keepwell-spec.md](docs/keepwell-spec.md).
 
-> **Status: 1.1.0.** Every check reads your real system and every action
-> works. The quick checks run by themselves (at login and hourly) and notify
-> you when something newly needs attention; the deep scans — virus, secrets,
-> dependencies — run when you ask or on a schedule you choose.
+## Features
+
+- **A shield in the bar**: a plain outline when all is well, a dot when
+  something wants a look, an exclamation mark when something needs action.
+- **Twenty checks in three sections**: Privacy, Security and System Care,
+  each check explained in plain words with the next step to take.
+- **Quick checks by themselves**: at login and every hour, about a second,
+  read-only. One notification when something newly needs attention.
+- **Deep scans when you choose**: virus, secrets and dependency scans on a
+  button or on a schedule you set (off by default), in the background at
+  idle priority, skipped on battery if you like.
+- **Every change shown first**: the exact commands appear before anything
+  runs, a terminal opens only for steps that need your password, and a
+  snapshot is offered before installs.
+- **Privacy settings you can undo**: block telemetry hosts, drop backup DNS
+  and connection checks, use a private network identity, send Do Not Track,
+  apply a Chromium privacy policy. Each is undone from the same place.
+- **Cleanup to the Trash**: caches, activity traces, unclaimed app folders
+  and broken launchers are moved to the Trash, never deleted outright; old
+  packages and journals through `paccache`, `pacman` and `journalctl`.
+- **Optional tools on request**: arch-audit, ClamAV, UFW, gitleaks,
+  osv-scanner, GufW and Flatseal install only when you ask. Without them
+  the check says "not installed".
+- **Theme-native, keyboard-driven**: colours, fonts, spacing and rounding
+  from your Omarchy theme, status by shape and word rather than colour
+  alone; `j`/`k`/`h`/`l`/`Tab`/`Enter` work throughout.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/keasbeexd/omarchy-keepwell.git --enable
+```
+
+The bar icon lands on the right of the bar; move it with
+`omarchy bar move keasbeexd.keepwell --section <left|center|right>`.
+Click it (or run `omarchy-shell keepwell toggle`) to open the window.
 
 ## What it looks like
 
@@ -49,15 +84,6 @@ theme.
 | S             | Schedule: quick checks and the deep-scan schedule |
 | M / D         | run / dismiss a missed scheduled scan |
 | Esc           | leave the actions, then close |
-
-## Installing
-
-```bash
-omarchy plugin add https://github.com/keasbeexd/omarchy-keepwell.git --enable
-```
-
-The bar icon lands on the right of the bar; move it with
-`omarchy bar move keasbeexd.keepwell --section <left|center|right>`.
 
 ## IPC
 
