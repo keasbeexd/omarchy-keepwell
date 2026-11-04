@@ -35,7 +35,7 @@ A panel widget with three tabs (Security / Privacy / System Care), each a Window
 |---|---|---|
 | Antivirus | ClamAV + ClamTK | detect, guided install, status, scheduling via counterpart adapters, launch |
 | Definitions scheduler | `clamav-freshclam.service` | parse/drove via systemd, visible terminal |
-| Firewall | UFW + GufW | read-only status tile, guided install, launch |
+| Firewall | UFW | status tile, guided install, allow a port, remove rules |
 | CVE advisory | **arch-audit** | run, group by severity, refresh |
 | Secrets scan | gitleaks | opt-in repo-folder scan, read-only report |
 | Dependency vulns | osv-scanner | opt-in project-dir scan ("for developers" badge) |
@@ -65,11 +65,11 @@ A panel widget with three tabs (Security / Privacy / System Care), each a Window
   - Scheduled scans: **ClamTK's own scheduled-scan store** (`~/.clamtk/nvdata`, flat key-value: frequency/day/hour). Keepwell parses and renders this schedule in its UI. Changes via explicit confirmation dialog only: backup the file, write only known ClamTK keys, validate, roll back on failed write. Ownership styling in the UI: "managed by ClamTK."
 - Default scope if user enables a scan timer: `~/Downloads`. Folder picker provided.
 
-### 3.2 Firewall — UFW + GufW
+### 3.2 Firewall — UFW
 
 - Read-only status check: on/off, default policy.
 - One labeled switch Off→"deny incoming, allow outgoing" default, and vice versa; confirm dialog shows the exact `sudo ufw` command; runs in a visible terminal.
-- Rule editing delegated to GufW ("Configure" button).
+- Rules are edited in Keepwell, through the same confirm dialog and terminal: "Allow a port" (digits only, 1 to 65535; TCP, UDP or both) and "Remove rules" (ticked from those in ufw's rule files, with every field validated first). GufW was dropped in 1.2.0: it runs as root through pkexec, and Xwayland refuses root's connection, so it can't open a window.
 
 ### 3.3 Vulnerability & secrets (new section)
 
@@ -247,3 +247,4 @@ Every tile helper is a bounded process: argv-array commands only (no shell-strin
     - **Broken launchers** are found by the unclaimed finder: `.desktop` files in `~/.local/share/applications` and `~/.config/autostart` whose program is gone. Same lean towards "fine" as folder claims: `Hidden=true`, shell command lines and relative paths are never broken. No age threshold.
     - **Crash dumps** are shown with their count and size but not offered: removing them needs root, and systemd's own tmpfiles rule deletes them after two weeks.
     Left out: their Memory tab (a task manager; btop exists), large-file listing (Disk Usage Analyzer), snapshot cleanup (§9), one-off maintenance buttons, and their root helper behind `pkexec` (marketplace rule: visible terminal only). The app-cache sheet now lists `thumbnails` too, since its size was already counted in App cache; it also stays under Activity traces, which remains a Privacy check because what it holds is a record of what you did.
+21. **Firewall rules move into Keepwell, GufW goes** (2026-11-04). GufW starts as root through pkexec, and Xwayland accepts only clients with the session's user id, so on Omarchy's Wayland session it exits with "cannot open display" after the password prompt. Getting it a window would mean widening root's access to the display, so the button and its install action are gone. "Allow a port" and "Remove rules" replace them, through the usual confirm sheet and terminal. This is the first time data reaches a root command, so it is kept narrow: a port is digits only, 1 to 65535, and is checked in the sheet and again in the runner; a rule to remove comes only from ufw's root-owned rule files, every field must match ufw's own format (`keepwell_ufw.py`), and anything else (app, interface, routed or logged rules) stays with `ufw`. Comments are shown, never passed on. `tests/test_ufw_rules.py` runs each delete command through ufw's own parser and checks it names the rule it came from.

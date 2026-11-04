@@ -193,6 +193,7 @@ Scope {
   property bool confirmSnapshot: false
   property string confirmContext: ""
   property var confirmChosen: null    // option ids; null until the first plan
+  property string confirmPort: ""     // what's typed so far, for an action that asks
   property var pendingAct: null       // { act, checkId }
   property bool planDirty: false
   // A plan run without a terminal: running, then its result (keepwell-run
@@ -263,6 +264,7 @@ Scope {
     confirmContext = context
     confirmSnapshot = false
     confirmChosen = null
+    confirmPort = ""
     confirmResult = null
     confirmOpen = true
     fetchPlan()
@@ -281,7 +283,14 @@ Scope {
     var flags = []
     if (confirmSnapshot) flags.push("--snapshot")
     if (confirmChosen !== null) flags.push("--with", confirmChosen.join(","))
+    if (/^[1-9][0-9]{0,4}$/.test(confirmPort) && Number(confirmPort) <= 65535) flags.push("--port", confirmPort)
     return flags
+  }
+
+  function setPort(text) {
+    if (running || text === confirmPort || !/^[0-9]{0,5}$/.test(text)) return
+    confirmPort = text
+    fetchPlan()
   }
 
   function toggleAllOptions() {
@@ -881,11 +890,13 @@ Scope {
       item.confirmContext = Qt.binding(function() { return root.confirmContext })
       item.confirmRunning = Qt.binding(function() { return root.confirmRunning })
       item.confirmResult = Qt.binding(function() { return root.confirmResult })
+      item.confirmPort = Qt.binding(function() { return root.confirmPort })
       item.confirmAccepted.connect(root.acceptConfirm)
       item.confirmCanceled.connect(root.cancelConfirm)
       item.confirmSnapshotToggled.connect(root.toggleSnapshot)
       item.confirmOptionToggled.connect(root.toggleOption)
       item.confirmAllToggled.connect(root.toggleAllOptions)
+      item.confirmPortTyped.connect(root.setPort)
 
       // From the manifest the shell hands over; shown in the footer.
       item.version = Qt.binding(function() {

@@ -44,6 +44,7 @@ import keepwell_av  # noqa: E402
 import keepwell_unclaimed  # noqa: E402
 import keepwell_schedule  # noqa: E402
 import keepwell_caches  # noqa: E402
+import keepwell_ufw  # noqa: E402
 
 START = time.monotonic()
 TOTAL_BUDGET = 25.0          # seconds for the whole run
@@ -257,7 +258,7 @@ def size_from_human(s):
 # ---------------------------------------------------------------- probes
 
 def probe_firewall():
-    p = {"installed": exists("/usr/bin/ufw"), "gufw": exists("/usr/bin/gufw")}
+    p = {"installed": exists("/usr/bin/ufw")}
     if not p["installed"]:
         return p
     conf = read_file("/etc/ufw/ufw.conf", 16384) or b""
@@ -267,12 +268,8 @@ def probe_firewall():
     for key, name in ((b"DEFAULT_INPUT_POLICY", "incoming"), (b"DEFAULT_OUTPUT_POLICY", "outgoing")):
         m = re.search(rb'(?m)^' + key + rb'="?(ACCEPT|DROP|REJECT)"?\s*$', defaults)
         p[name] = m.group(1).decode().lower() if m else None
-    rules = 0
-    for f in ("/etc/ufw/user.rules", "/etc/ufw/user6.rules"):
-        raw = read_file(f, 1 << 20)
-        if raw:
-            rules += len(re.findall(rb"(?m)^### tuple ###", raw))
-    p["rules"] = rules
+    p["rules"] = len(keepwell_ufw.rules(read_file("/etc/ufw/user.rules", 1 << 20),
+                                        read_file("/etc/ufw/user6.rules", 1 << 20)))
     p["unitEnabled"], p["unitActive"] = unit_state("ufw.service")
     return p
 

@@ -288,23 +288,23 @@ function firewall(p) {
     actions: [install("Install UFW", "install-ufw")] })
   var on = p.enabled === true && p.unitActive === "active"
   var blocks = p.incoming === "drop" || p.incoming === "reject"
-  var gui = p.gufw ? { label: "Edit rules in GufW", primary: on && blocks, launch: "gufw.desktop" }
-    : { label: "Install GufW to edit rules", elevated: true, act: "install-gufw" }
+  var rules = [{ label: "Allow a port…", primary: on && blocks, elevated: true, act: "ufw-allow" }]
+  if (p.rules > 0) rules.push({ label: "Remove rules…", elevated: true, act: "ufw-remove-rules" })
   var facts = [
     fact("Status", on ? "Active" : p.enabled === true ? "Enabled, not running" : "Off"),
     fact("Incoming", p.incoming === "accept" ? "Allow" : p.incoming ? "Deny" : "Unknown"),
     fact("Outgoing", p.outgoing === "accept" ? "Allow" : p.outgoing ? "Deny" : "Unknown"),
-    fact("Rules", String(p.rules), p.gufw ? "managed by GufW" : "")
+    fact("Rules", String(p.rules))
   ]
-  if (!on) return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "crit", status: "The firewall is off",
+  if (!on) return check(b, { kind: "crit", status: "The firewall is off",
     meta: "Nothing is filtering incoming connections", facts: facts,
-    actions: [{ label: "Turn on", primary: true, elevated: true, act: "ufw-on" }, gui] })
-  if (!blocks) return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "attn", status: "On, but incoming connections are allowed",
+    actions: [{ label: "Turn on", primary: true, elevated: true, act: "ufw-on" }].concat(rules) })
+  if (!blocks) return check(b, { kind: "attn", status: "On, but incoming connections are allowed",
     meta: "The usual default is to deny incoming", facts: facts,
-    actions: [{ label: "Deny incoming…", primary: true, elevated: true, act: "ufw-deny-incoming" }, gui] })
-  return check(b, { tool: p.gufw ? "UFW · GufW" : "UFW", kind: "good", status: "On — blocks incoming, allows outgoing",
-    meta: plural(p.rules, "rule", "rules") + (p.gufw ? " · edit in GufW" : ""), facts: facts,
-    actions: [gui, { label: "Turn off…", elevated: true, act: "ufw-off" }] })
+    actions: [{ label: "Deny incoming…", primary: true, elevated: true, act: "ufw-deny-incoming" }].concat(rules) })
+  return check(b, { kind: "good", status: "On — blocks incoming, allows outgoing",
+    meta: plural(p.rules, "rule", "rules"), facts: facts,
+    actions: rules.concat([{ label: "Turn off…", elevated: true, act: "ufw-off" }]) })
 }
 
 function outside(p, perms, now) {
