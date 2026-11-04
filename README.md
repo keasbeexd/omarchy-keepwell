@@ -10,7 +10,9 @@ language. Every colour the window draws comes from your active Omarchy theme.
 Keepwell is for people new to Linux. It is a frontend and a coordinator, not
 a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,
 arch-audit, Flatseal, Snapper...), Keepwell shows its state in plain language
-and hands you to it. The full design is in
+and hands you to it. Firewall rules are the exception: Keepwell adds and
+removes simple ones itself through `ufw`, because the graphical editors
+can't open on Wayland. The full design is in
 [docs/keepwell-spec.md](docs/keepwell-spec.md).
 
 ## Features
@@ -33,8 +35,10 @@ and hands you to it. The full design is in
 - **Cleanup to the Trash**: caches, activity traces, unclaimed app folders
   and broken launchers are moved to the Trash, never deleted outright; old
   packages and journals through `paccache`, `pacman` and `journalctl`.
+- **Firewall rules in the window**: allow a port or remove rules from the
+  Firewall check, with the same confirm step and visible terminal.
 - **Optional tools on request**: arch-audit, ClamAV, UFW, gitleaks,
-  osv-scanner, GufW and Flatseal install only when you ask. Without them
+  osv-scanner and Flatseal install only when you ask. Without them
   the check says "not installed".
 - **Theme-native, keyboard-driven**: colours, fonts, spacing and rounding
   from your Omarchy theme, status by shape and word rather than colour
@@ -248,12 +252,14 @@ needs your password use a terminal; the rest run inside Keepwell:
 
 | Action | Commands |
 |---|---|
-| Install arch-audit, gitleaks, osv-scanner, GufW, Flatpak and Flatseal, Disk Usage Analyzer | `omarchy pkg add <package>` |
+| Install arch-audit, gitleaks, osv-scanner, Flatpak and Flatseal, Disk Usage Analyzer | `omarchy pkg add <package>` |
 | Install ClamAV | `omarchy pkg add clamav`, `sudo freshclam`, `sudo systemctl enable --now clamav-freshclam.service` |
 | Turn on definition updates | `sudo systemctl enable --now clamav-freshclam.service` |
 | Install UFW / Turn on the firewall | `omarchy pkg add ufw` (install only), `sudo ufw default deny incoming`, `sudo ufw default allow outgoing`, `sudo ufw enable` |
 | Deny incoming | `sudo ufw default deny incoming` |
 | Turn off the firewall | `sudo ufw disable` |
+| Allow a port | `sudo ufw allow <port>/tcp` and/or `sudo ufw allow <port>/udp`. Keepwell accepts digits only, 1 to 65535 |
+| Remove firewall rules | `sudo ufw delete <rule>` for each one ticked, built from the fields in `/etc/ufw/user*.rules`. A rule is listed only if every field matches ufw's own format; app, interface, routed and logged rules are left to `ufw` |
 | Update Flatpak apps | `flatpak update -y --noninteractive` (omarchy update doesn't; no password, Flatpak's own policy allows signed updates) |
 | Turn off SSH | `sudo systemctl disable --now sshd.service` |
 | Allow SSH keys only (offered once a key is in `~/.ssh/authorized_keys`) | writes `/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf` (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`), `sudo sshd -t` — if the test fails the file is removed again — then `sudo systemctl try-reload-or-restart sshd.service`. Open sessions stay open |
@@ -472,7 +478,7 @@ Crash dumps in `/var/lib/systemd/coredump` are counted on Cleanup but not
 offered for removal: removing them needs root, and systemd deletes them
 after two weeks.
 
-Opening an app (GufW, Flatseal, Disk Usage Analyzer, VS Code) runs
+Opening an app (Flatseal, Disk Usage Analyzer, VS Code) runs
 `uwsm-app -- <app>.desktop` and closes Keepwell.
 
 ClamAV's definition updates download from ClamAV's servers, and package
@@ -520,7 +526,7 @@ these are everything Keepwell can have written:
 | `/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf` (Allow SSH keys only) | `sudo rm` it, then `sudo systemctl try-reload-or-restart sshd` |
 | `~/.config/uwsm/env.d/90-keepwell-debuginfod`, `90-keepwell-do-not-track` | `rm` them; they stop applying at the next login |
 
-Packages Keepwell installed for you (arch-audit, ClamAV, gitleaks, GufW,
+Packages Keepwell installed for you (arch-audit, ClamAV, gitleaks,
 Flatseal, Disk Usage Analyzer, UFW) are ordinary packages and stay installed;
 ClamAV's `clamav-freshclam` service stays enabled if you turned it on. Items
 moved to the Trash stay there until you empty it.

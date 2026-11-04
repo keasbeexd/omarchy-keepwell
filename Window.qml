@@ -40,11 +40,13 @@ Item {
   property string confirmContext: ""
   property bool confirmRunning: false
   property var confirmResult: null
+  property string confirmPort: ""
   signal confirmAccepted()
   signal confirmCanceled()
   signal confirmSnapshotToggled()
   signal confirmOptionToggled(string id)
   signal confirmAllToggled()
+  signal confirmPortTyped(string text)
 
   // The Trash sheet, driven by the service.
   property bool trashOpen: false
@@ -514,11 +516,13 @@ Item {
           context: root.confirmContext
           running: root.confirmRunning
           result: root.confirmResult
+          port: root.confirmPort
           onConfirmed: root.confirmAccepted()
           onCanceled: root.confirmCanceled()
           onSnapshotToggled: root.confirmSnapshotToggled()
           onOptionToggled: function(id) { root.confirmOptionToggled(id) }
           onAllToggled: root.confirmAllToggled()
+          onPortTyped: function(text) { root.confirmPortTyped(text) }
         }
 
         ScheduleSheet {

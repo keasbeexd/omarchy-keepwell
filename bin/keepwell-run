@@ -1,8 +1,8 @@
 #!/usr/bin/python3 -I -S
 """Keepwell's action runner.
 
-    keepwell-run plan  <action> [--snapshot] [--with a,b]   print the plan as JSON
-    keepwell-run apply <action> [--snapshot] [--with a,b]   show the plan in this
+    keepwell-run plan  <action> [--snapshot] [--with a,b] [--port n]   print the plan as JSON
+    keepwell-run apply <action> [--snapshot] [--with a,b] [--port n]   show the plan in this
                                     terminal, wait for Enter, then run it
     keepwell-run apply-here <action> <digest> [--with a,b]   run a plan that
                                     needs no root or password, without a
@@ -34,7 +34,8 @@
                                               across a shell restart (omarchy update)
 
 --with picks among an action's options (cleanup, for one); without it the
-options marked safe are used. Sets for Trash are "cache" (folders in
+options marked safe are used. --port gives the one action that asks for a
+number that number, and is refused unless it is a port (1 to 65535). Sets for Trash are "cache" (folders in
 ~/.cache), "devcache" (developer caches outside it, keepwell_caches.py),
 "traces" (recent files, shell history, thumbnails), "unclaimed" and
 "launchers" (see keepwell_unclaimed.py) and "virus"; moving to Trash needs
@@ -43,10 +44,12 @@ no root, and everything moved can be restored from the Trash.
 Both modes build the plan from the same table below, so the commands the
 confirm dialog shows are the commands that run. Actions are a fixed set and
 take no data from outside: nothing a file, a window title or another program
-says can reach an argument.
+says can reach an argument. There are two exceptions, each held to an exact
+form: the port you type for "Allow a port", and the fields of the rules in
+ufw's own root-owned files for "Remove firewall rules" (keepwell_ufw.py).
 
 Nothing here runs as root. Steps that need it call sudo (or an Omarchy
-command that calls sudo) on a root-owned system binary with literal
+command that calls sudo) on a root-owned system binary with fixed
 arguments, in this visible terminal, so you see each command and type your
 password here — never in Keepwell. A plan with no such step runs from
 Keepwell itself (apply-here), after the same confirm sheet.
@@ -73,6 +76,7 @@ import keepwell_av  # noqa: E402
 import keepwell_unclaimed  # noqa: E402
 import keepwell_schedule  # noqa: E402
 import keepwell_caches  # noqa: E402
+import keepwell_ufw  # noqa: E402
 
 OMARCHY = "/usr/bin/omarchy"
 SUDO = "/usr/bin/sudo"
@@ -223,10 +227,6 @@ ACTIONS = {
         title="Install gitleaks",
         summary="Adds gitleaks, which finds passwords and keys committed to git repositories.",
         system=True, steps=lambda o: [pkg_add("gitleaks")]),
-    "install-gufw": dict(
-        title="Install GufW",
-        summary="Adds GufW, a window for viewing and editing your firewall rules.",
-        system=True, steps=lambda o: [pkg_add("gufw")]),
     "install-ufw": dict(
         title="Install and turn on the firewall",
         summary="Adds UFW, then blocks incoming connections and allows outgoing ones.",
@@ -245,6 +245,18 @@ ACTIONS = {
         summary="Stops filtering connections. Your rules are kept and come back when you turn it on again.",
         system=False, steps=lambda o: [
             step("Switch the firewall off", ["/usr/bin/ufw", "disable"], root=True)]),
+    "ufw-allow": dict(
+        title="Allow a port",
+        summary="Lets other devices connect to this computer on one port, from any network it joins. Do this only for a program you run and trust.",
+        system=False, input="port",
+        options=lambda: [
+            dict(id="tcp", label="TCP", hint="What most programs use", default=True),
+            dict(id="udp", label="UDP", hint="Games, voice and device discovery", default=False)],
+        steps=lambda o, port: _ufw_allow(o, port)),
+    "ufw-remove-rules": dict(
+        title="Remove firewall rules",
+        summary="Tick the rules to remove. Rules for apps, network interfaces or routing aren't listed; sudo ufw status numbered shows those.",
+        system=False, options=lambda: _ufw_rule_options(), steps=lambda o: _ufw_remove(o)),
     "install-flatseal": dict(
         title="Install Flatpak and Flatseal",
         summary="Adds Flatpak (a sandboxed way to install apps) and Flatseal, which shows and changes what each Flatpak app may reach.",
@@ -318,6 +330,27 @@ def _ufw_on():
         step("Allow outgoing by default", ["/usr/bin/ufw", "default", "allow", "outgoing"], root=True),
         step("Switch the firewall on", ["/usr/bin/ufw", "enable"], root=True),
     ]
+
+
+def _ufw_allow(chosen, port):
+    if not port:
+        return []
+    return [step("Allow incoming %s on port %s" % (proto.upper(), port),
+                 ["/usr/bin/ufw", "allow", "%s/%s" % (port, proto)], root=True)
+            for proto in ("tcp", "udp") if proto in chosen]
+
+
+def _ufw_rules():
+    return keepwell_ufw.removable(read_root_file("/etc/ufw/user.rules"), read_root_file("/etc/ufw/user6.rules"))
+
+
+def _ufw_rule_options():
+    return [dict(id=r["id"], label=r["label"], hint=r["hint"], default=False) for r in _ufw_rules()]
+
+
+def _ufw_remove(chosen):
+    return [step("Remove: " + r["label"], ["/usr/bin/ufw"] + r["argv"], root=True)
+            for r in _ufw_rules() if r["id"] in chosen]
 
 
 def _cleanup_options():
@@ -737,14 +770,14 @@ def _snapshot():
     return step("Create a system snapshot", [OMARCHY, "snapshot", "create"], password=True)
 
 
-def plan(action_id, snapshot, chosen=None):
+def plan(action_id, snapshot, chosen=None, port=None):
     a = ACTIONS[action_id]
     options = a["options"]() if "options" in a else []
     ids = {o["id"] for o in options}
     if chosen is None:
         chosen = {o["id"] for o in options if o["default"]}
     chosen = set(chosen) & ids
-    steps = a["steps"](chosen)
+    steps = a["steps"](chosen, port) if "input" in a else a["steps"](chosen)
     if snapshot and a.get("system") and steps:
         steps = [_snapshot()] + steps
     shown = [dict({"say": s["say"], "cmd": shlex.join(s["argv"]), "root": s["root"]},
@@ -754,6 +787,8 @@ def plan(action_id, snapshot, chosen=None):
     return {
         "id": action_id, "title": a["title"], "summary": a["summary"],
         "snapshotOffered": a["system"],
+        # What the sheet asks you to type, if anything.
+        "input": a.get("input", ""),
         # What it printed is the point (it reads only), so the sheet shows it.
         "showOutput": a.get("output", False),
         "options": [{"id": o["id"], "label": o["label"], "hint": o["hint"], "checked": o["id"] in chosen}
@@ -838,8 +873,8 @@ def wait_enter(prompt):
         return False
 
 
-def apply(action_id, snapshot, chosen=None):
-    p = plan(action_id, snapshot, chosen)
+def apply(action_id, snapshot, chosen=None, port=None):
+    p = plan(action_id, snapshot, chosen, port)
     print(f"\n{BOLD}Keepwell · {p['title']}{RESET}\n")
     print(p["summary"] + "\n")
     if not p["steps"]:
@@ -1985,29 +2020,33 @@ def main():
         sys.stderr.write("usage: keepwell-run plan|apply|apply-here <action> [--snapshot] [--with a,b] | list|trash <set> ...\n")
         return 2
     snapshot, chosen, rest = False, None, args[2:]
-    digest = None
+    digest, port = None, None
     if args[0] == "apply-here" and rest and re.fullmatch(r"[0-9a-f]{64}", rest[0]):
         digest, rest = rest[0], rest[1:]
     while rest:
         if rest[0] == "--snapshot" and not snapshot:
             snapshot, rest = True, rest[1:]
         elif rest[0] == "--with" and chosen is None and len(rest) >= 2 \
-                and re.fullmatch(r"(?:[a-z0-9]{1,24}(?:,[a-z0-9]{1,24}){0,15})?", rest[1]):
+                and re.fullmatch(r"(?:[a-z0-9]{1,24}(?:,[a-z0-9]{1,24}){0,%d})?" % (keepwell_ufw.MAX_LISTED - 1), rest[1]):
             chosen, rest = set(filter(None, rest[1].split(","))), rest[2:]
+        elif rest[0] == "--port" and port is None and len(rest) >= 2 \
+                and ACTIONS[args[1]].get("input") == "port" \
+                and re.fullmatch(r"[1-9][0-9]{0,4}", rest[1]) and int(rest[1]) <= 65535:
+            port, rest = rest[1], rest[2:]
         else:
             return 2
     if args[0] == "plan":
-        p = plan(args[1], snapshot, chosen)
+        p = plan(args[1], snapshot, chosen, port)
         del p["_steps"]
         sys.stdout.write(json.dumps(p, separators=(",", ":")))
         return 0
     if args[0] == "apply-here":
-        if snapshot or digest is None:
+        if snapshot or digest is None or port:
             return 2
         sys.stdout.write(json.dumps(apply_here(args[1], digest, chosen), separators=(",", ":"), ensure_ascii=False))
         return 0
     signal.signal(signal.SIGINT, signal.default_int_handler)
-    return apply(args[1], snapshot, chosen)
+    return apply(args[1], snapshot, chosen, port)
 
 
 if __name__ == "__main__":

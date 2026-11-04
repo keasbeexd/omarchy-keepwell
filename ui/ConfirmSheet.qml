@@ -16,12 +16,14 @@ Item {
   property bool snapshot: false
   property bool running: false     // running here, without a terminal
   property var result: null        // { done, output } once it has, when worth showing
+  property string port: ""         // what's typed so far, for a plan that asks for a port
 
   signal confirmed()
   signal canceled()
   signal snapshotToggled()
   signal optionToggled(string id)
   signal allToggled()
+  signal portTyped(string text)
 
   readonly property bool ready: plan !== null && !failed
   readonly property var options: plan && Array.isArray(plan.options) ? plan.options : []
@@ -44,12 +46,17 @@ Item {
   // No password anywhere in it, so no terminal.
   readonly property bool here: hasSteps && !anyRoot
   readonly property bool showResult: result !== null
+  // Kept while the next plan loads, so fast typing doesn't lose a digit. The
+  // keys are read in handleKey rather than by a text field: only digits can
+  // get in, and the sheet's own keys keep working.
+  property bool takesPort: false
+  readonly property bool portInRange: /^[1-9][0-9]{0,4}$/.test(port) && Number(port) <= 65535
 
   visible: opened
   // The cursor starts on "Open terminal" once the first plan (and so the
   // number of options) is known; later plans keep it where it is.
   property bool _placed: false
-  onOpenedChanged: if (opened) { _placed = false; flick.contentY = 0 }
+  onOpenedChanged: if (opened) { _placed = false; takesPort = false; flick.contentY = 0 }
   onCursorChanged: follow()
 
   // Keep the option under the keyboard cursor in view.
@@ -66,6 +73,7 @@ Item {
   onResultChanged: if (result) { cursor = confirmIndex; flick.contentY = 0 }
   onPlanChanged: {
     if (!plan) return
+    takesPort = plan.input === "port"
     // From the plan itself: the bindings that count options may not have
     // caught up yet when this handler runs.
     var n = Array.isArray(plan.options) ? plan.options.length : 0
@@ -145,6 +153,38 @@ Item {
           }
 
           ColumnLayout {
+            visible: root.takesPort && !root.showResult
+            Layout.fillWidth: true
+            spacing: Tokens.sp(6)
+            KText {
+              text: "Port number"
+              font.pixelSize: Tokens.small
+              color: Tokens.fg2
+            }
+            Rectangle {
+              Layout.fillWidth: true
+              implicitHeight: portText.implicitHeight + Tokens.sp(20)
+              radius: Tokens.radius
+              color: Tokens.fill2
+              border.width: Tokens.border
+              border.color: Tokens.accent
+              KText {
+                id: portText
+                x: Tokens.sp(14)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.port !== "" ? root.port : "Type a number, like 8080"
+                color: root.port !== "" ? Tokens.fg : Tokens.fg3
+              }
+            }
+            KText {
+              visible: root.port !== "" && !root.portInRange
+              text: "Ports go from 1 to 65535."
+              font.pixelSize: Tokens.small
+              color: Tokens.fg2
+            }
+          }
+
+          ColumnLayout {
             visible: root.options.length > 0 && !root.showResult
             Layout.fillWidth: true
             spacing: Tokens.sp(10)
@@ -205,7 +245,8 @@ Item {
           KText {
             visible: root.ready && !root.hasSteps
             Layout.fillWidth: true
-            text: root.options.length > 0 ? "Tick something above to see the commands." : "There is nothing to do right now."
+            text: root.takesPort && !root.portInRange ? "Type a port above to see the commands."
+              : root.options.length > 0 ? "Tick something above to see the commands." : "There is nothing to do right now."
             color: Tokens.fg2
             wrapMode: Text.WordWrap
           }
@@ -365,6 +406,16 @@ Item {
       var next = root.cursor + d
       if (next === root.boxIndex && !(root.ready && root.plan.snapshotOffered)) next += d
       return Math.max(0, Math.min(root.confirmIndex, next))
+    }
+    if (root.takesPort && !root.showResult && !root.running) {
+      if (event.key >= Qt.Key_0 && event.key <= Qt.Key_9) {
+        if (root.port.length < 5) root.portTyped(root.port + (event.key - Qt.Key_0))
+        return true
+      }
+      if (event.key === Qt.Key_Backspace) {
+        root.portTyped(root.port.slice(0, -1))
+        return true
+      }
     }
     if (event.key === Qt.Key_Escape) root.canceled()
     else if (root.showResult && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) root.canceled()
