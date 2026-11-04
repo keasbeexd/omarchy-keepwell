@@ -5,7 +5,7 @@ language. Every colour the window draws comes from your active Omarchy theme.
 
 <img src="docs/logo.svg" width="96" alt="Keepwell's shield with a check mark, in 16 EGA colours">
 
-![Keepwell's window, framed in a Turbo Pascal-style screen](preview.png)
+![Keepwell's window open on its Privacy section, with its shield in the Omarchy bar](preview.png)
 
 Keepwell is for people new to Linux. It is a frontend and a coordinator, not
 a toolkit: wherever a maintained tool already does the job (ClamAV, UFW,

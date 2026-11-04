@@ -56,25 +56,33 @@ BarWidget {
     tooltipText: root.worst === "crit" ? "Keepwell — " + root.summary
       : root.worst === "attn" ? "Keepwell — " + root.summary
       : "Keepwell — all good"
+    // Omarchy 4.5 measures what this draws and scales it to the bar's icon
+    // size. It does not see a later change to the Glyph's internal scale, so
+    // the size is fixed: taken from parent.width it starts at zero, the shield
+    // measures as nothing, and the dot alone gets scaled up to fill the slot.
     iconComponent: Component {
       Item {
         K.Glyph {
+          id: shield
           anchors.centerIn: parent
-          size: parent.width * 0.86
+          size: 14
           strokeWidth: root.worst === "crit" ? 1.6 : 1.4
           name: root.worst === "crit" ? "shieldAlert" : "shield"
           color: root.worst === "crit" ? Color.bar.active : button.foreground
-        }
-        Rectangle {
-          visible: root.worst === "attn"
-          width: Math.max(4, Math.round(parent.width * 0.34))
-          height: width
-          radius: width / 2
-          x: parent.width - width
-          y: 0
-          color: button.foreground
-          border.width: 1
-          border.color: Color.bar.background
+
+          // Held to the shield's top right corner rather than past it: every
+          // measured part counts, so a dot outside would shrink the shield.
+          Rectangle {
+            visible: root.worst === "attn"
+            width: 5
+            height: width
+            radius: width / 2
+            x: shield.size * 13.5 / 16 - width
+            y: shield.size * 1.5 / 16
+            color: button.foreground
+            border.width: 1
+            border.color: Color.bar.background
+          }
         }
       }
     }
