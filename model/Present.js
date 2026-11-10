@@ -237,7 +237,11 @@ function antivirus(p, now) {
   else facts = facts.concat([fact("Folder", where(last.target)), scannedFact(last.at, now),
     fact("Files", !last.finished ? "Stopped before the end"
       : (typeof last.files === "number" ? plural(last.files, "scanned", "scanned") + " · " : "")
-        + (last.infected ? plural(last.infected, "infected file", "infected files") : "nothing found"))])
+        + (last.infected ? plural(last.infected, "infected file", "infected files")
+          : last.incomplete ? "incomplete" : "nothing found"))])
+  // A scan clamscan finished with errors is never shown as clean.
+  var incomplete = !p.scanning && last && last.finished && last.incomplete ? last.incomplete : ""
+  if (incomplete) facts.push(fact("Incomplete", incomplete))
   var found = last && last.finished && last.infected ? last.found || [] : []
   for (var i = 0; i < found.length; i++) facts.push(fact(i === 0 ? "Found" : "", found[i]))
   if (p.allowed) facts.push(fact("Not a threat", plural(p.allowed, "file", "files")
@@ -254,10 +258,11 @@ function antivirus(p, now) {
   if (!auto) actions.push({ label: "Turn on auto-update", primary: !p.scanning && !found.length, elevated: true, act: "freshclam-on" })
   if (p.allowed) actions.push({ label: "Stop ignoring " + plural(p.allowed, "file", "files"), unignore: "virus" })
   return check(b, {
-    kind: found.length ? "crit" : stale ? "attn" : "good",
+    kind: found.length ? "crit" : stale || incomplete ? "attn" : "good",
     status: p.scanning ? "Scanning in the background…"
       : found.length ? plural(found.length, "infected file", "infected files") + " found"
-      : age === null ? "No virus definitions yet" : stale ? "Virus definitions are " + age + " days old" : "Definitions are up to date",
+      : age === null ? "No virus definitions yet"
+      : incomplete ? "The last virus scan was incomplete" : stale ?"Virus definitions are " + age + " days old" : "Definitions are up to date",
     meta: p.scanning ? (progress ? progress.text : "You'll get a notification when it's done")
       : last ? "Scanned " + ago(last.at, now) + " · " + where(last.target) : "No scans yet",
     progress: progress,
