@@ -206,7 +206,8 @@ at 0600, written through a fresh temporary file and a rename.
 | `audit.json` | the last arch-audit result you asked for: package names, severities, fix versions |
 | `osv.json` | the last dependency scan: for each vulnerable library, the project and lockfile, the package and version, its vulnerability ids, CVEs, severities, one-line summaries and fixed versions |
 | `gitleaks.json` | the last secrets scan: the folder, how many repositories, and for each finding only the repository, file, line, rule name and commit — never the secret |
-| `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files |
+| `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files, clamscan's summary and its exit status |
+| `clamav/filelist-*.txt` | the paths of the files the last scan of that folder handed to clamscan; replaced by the next scan |
 | `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
 | `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
 | `av-allowed.json` | files the virus scan flagged that you marked as not a threat: each one's path, SHA-256 and the signature it matched |
@@ -320,14 +321,21 @@ systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
   -- /usr/bin/python3 -I -S <plugin>/bin/keepwell-run clam-scan downloads|home
 ```
 
-Inside that service, Keepwell first counts the files the scan will reach
-(at most 30 seconds; a home folder takes a few), then runs
-`/usr/bin/clamscan --recursive --infected --verbose [--exclude-dir=…] -- <folder>`
-and counts its `Scanning <file>` lines. Every two seconds it writes how far
-it has got to `progress-clamscan.json`, which the window shows as a bar with
-an estimate of the time left. The per-file lines are not kept: the log holds
-only the files found and clamscan's summary. The secrets and dependency
-scans report progress the same way, one repository at a time.
+Inside that service, Keepwell first lists the regular files the scan will
+reach into a private file list (symlinks are not followed, and a file whose
+name contains a control character is left out and counted), then runs
+`/usr/bin/clamscan --infected --verbose --file-list=<list>` and counts its
+`Scanning <file>` lines. Every two seconds it writes how far it has got to
+`progress-clamscan.json`, which the window shows as a bar with an estimate of
+the time left. The per-file lines are not kept: the log holds only the files
+found, clamscan's summary, and two lines Keepwell adds after it: how many
+files were left out, and clamscan's exit status. A scan only counts as clean
+when clamscan exited 0 or 1, its summary reports no errors and no file was
+left out. A file clamscan couldn't read (it then exits 2 after a normal
+summary), an error exit or a missing status shows the scan as incomplete
+in the check, the notification and the deep-scan summary, never as
+"nothing found". The secrets and dependency scans report progress the same
+way, one repository at a time.
 
 - **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~` but
   skips `~/.cache`, `~/.local/share/Trash` and Keepwell's own logs. A home

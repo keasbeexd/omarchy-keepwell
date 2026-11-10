@@ -1133,8 +1133,12 @@ def clam_scan(target):
                 continue
             out.write(line[:4096])
         rc = proc.wait()
+        # Written after clamscan's summary, so keepwell_av.outcome reads them
+        # with it: a scan with errors (an unreadable file makes clamscan exit
+        # 2 after a normal summary) is never shown as clean.
         if odd:
             out.write(b"Keepwell: %d file(s) with control characters in their names were not scanned\n" % odd)
+        out.write(b"Keepwell: clamscan exit status %d\n" % rc)
     # 0 nothing found, 1 something found; anything else is clamscan's error.
     return 0 if rc in (0, 1) else rc
 
@@ -1323,15 +1327,20 @@ def notify(kind, quiet=False):
         if "----------- SCAN SUMMARY -----------" not in log:
             title, body = "Virus scan stopped", where + ": stopped before the end."
         else:
-            files = re.search(r"(?m)^Scanned files: (\d+)$", log)
-            secs = re.search(r"(?m)^Time: ([0-9.]+) sec", log)
-            n = _infected(log)
+            tail = keepwell_av.summary(log)
+            files = re.search(r"(?m)^Scanned files: (\d+)$", tail)
+            secs = re.search(r"(?m)^Time: ([0-9.]+) sec", tail)
+            n, o = _infected(log), keepwell_av.outcome(log)
             took = (" in %d min" % round(float(secs.group(1)) / 60)) if secs and float(secs.group(1)) >= 90 \
                 else (" in %d s" % round(float(secs.group(1)))) if secs else ""
-            title = "Virus scan finished"
+            title = "Virus scan finished" if o["complete"] else "Virus scan incomplete"
             body = "%s: %s, %s files checked%s." % (
-                where, ("%d infected file%s found" % (n, "" if n == 1 else "s")) if n else "nothing found",
+                where, ("%d infected file%s found" % (n, "" if n == 1 else "s")) if n
+                else "nothing found" if o["complete"] else "nothing found in the files it could read",
                 files.group(1) if files else "?", took)
+            if not o["complete"]:
+                why = keepwell_av.incomplete_text(o)
+                body += " " + why[0].upper() + why[1:] + "."
     elif kind == "osv":
         doc = keepwell_state.read_json("osv.json") or {}
         if not doc.get("finished") or not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
@@ -1566,8 +1575,10 @@ def _deep_summary(parts, started, skipped):
         elif "----------- SCAN SUMMARY -----------" not in log:
             said.append("virus scan of %s stopped before the end" % where)
         else:
-            n = _infected(log)
-            said.append("virus scan of %s: %s" % (where, "%d infected file%s" % (n, "" if n == 1 else "s") if n else "nothing found"))
+            n, o = _infected(log), keepwell_av.outcome(log)
+            said.append("virus scan of %s: %s" % (where, "%d infected file%s" % (n, "" if n == 1 else "s") if n
+                                                  else "nothing found" if o["complete"]
+                                                  else "incomplete (%s)" % keepwell_av.incomplete_text(o)))
     for name, label, key in (("leaks", "secrets", "gitleaks.json"), ("osv", "dependencies", "osv.json")):
         if name not in parts:
             continue

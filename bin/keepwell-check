@@ -414,8 +414,14 @@ def _last_scan():
         m = re.search(r"(?m)^" + key + r": (\d+)$", tail)
         if m:
             out[field] = int(m.group(1))
+    # A finished scan with errors (clamscan exits 2 after a normal summary
+    # when it can't read a file) is never shown as "nothing found".
+    o = keepwell_av.outcome(log)
+    out["complete"] = o["complete"]
+    if out["finished"] and not o["complete"]:
+        out["incomplete"] = clean(keepwell_av.incomplete_text(o), 120)
     shown, hidden = keepwell_av.split(keepwell_av.findings(log))
-    out["found"] = [clean(path.replace(HOME, "~", 1), 160) for path, _ in shown][:20]
+    out["found"] =[clean(path.replace(HOME, "~", 1), 160) for path, _ in shown][:20]
     out["allowedFound"] = len(hidden)
     if "infected" in out:
         # The summary can never say fewer than the files named as found.
