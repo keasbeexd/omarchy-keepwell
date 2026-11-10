@@ -395,6 +395,15 @@ function leaks(tools, now) {
                fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
   for (var i = 0; i < Math.min(f.length, 30); i++)
     facts.push(fact(f[i].repo, f[i].file + (f[i].line ? ":" + f[i].line : ""), f[i].rule + (f[i].commit ? " · " + f[i].commit : "")))
+  // A repository gitleaks couldn't finish (error, timeout, huge report) is
+  // never counted as clean.
+  if (last.failed && !f.length) return check(b, { kind: "attn",
+    status: last.scanned ? "Only " + last.scanned + " of " + (last.scanned + last.failed) + " repositories could be scanned"
+      : "Couldn't scan your repositories",
+    meta: "gitleaks stopped with an error or ran out of time — scan again",
+    facts: facts,
+    actions: [{ label: "Scan again", primary: true, rescan: "leaks", folder: last.folder }]
+      .concat(last.folder === "~" ? [choose] : [home, choose]) })
   return check(b, { kind: f.length ? "attn" : "good",
     status: f.length ? plural(f.length, "possible secret", "possible secrets") + " in your repositories"
       : last.repos ? "No secrets found" : "No git repositories in that folder",
