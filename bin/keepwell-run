@@ -98,11 +98,15 @@ DISPLAY_ENV = ("WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "XDG_CURRENT_DES
                "DBUS_SESSION_BUS_ADDRESS", "XCURSOR_SIZE", "XCURSOR_THEME", "GTK_THEME", "HOME", "LANG")
 
 
-def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,), failed="", extra_env=None):
+def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,), failed="", extra_env=None,
+            with_status=False):
     """stdout of argv as text, or "" on failure, overrun or overflow. ok_codes:
     exit codes that count as success (some scanners exit 1 when they find
     something). failed: what to return when it didn't work — pass None
-    where "no output" and "couldn't run" must not be confused."""
+    where "no output" and "couldn't run" must not be confused.
+    with_status: return (text, exit code) instead, keeping the output of a
+    run that exited with any code; text is `failed` and the code None when it
+    couldn't start, overran or overflowed, since that output is cut short."""
     env = {"PATH": "/usr/bin", "LC_ALL": "C"}
     env.update(extra_env or {})
     # `systemctl --user` reaches your session's service manager through these.
@@ -115,7 +119,7 @@ def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,), failed
                                 stderr=subprocess.DEVNULL, env=env,
                                 cwd="/", start_new_session=True, close_fds=True)
     except OSError:
-        return failed
+        return (failed, None) if with_status else failed
     deadline, chunks, size, ok = time.monotonic() + timeout, [], 0, True
     fd = proc.stdout.fileno()
     while True:
@@ -142,13 +146,15 @@ def capture(argv, timeout=10.0, cap=256 * 1024, gui=False, ok_codes=(0,), failed
                 break
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 continue
-        return failed
+        return (failed, None) if with_status else failed
     try:
         proc.wait(timeout=max(0.1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
-        return failed
+        return (failed, None) if with_status else failed
+    if with_status:
+        return b"".join(chunks).decode("utf-8", "replace"), proc.returncode
     return b"".join(chunks).decode("utf-8", "replace") if proc.returncode in ok_codes else failed
 
 
@@ -1342,10 +1348,12 @@ def notify(kind, quiet=False):
         if not doc.get("finished") or not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
             title, body = "Secrets scan stopped", "Stopped before the end."
         else:
-            n, repos = len(doc.get("findings") or []), doc.get("scanned", 0)
-            title = "Secrets scan finished"
-            body = ("%d possible secret%s" % (n, "" if n == 1 else "s") if n else "No secrets found") + \
-                " in %d repositor%s." % (repos, "y" if repos == 1 else "ies")
+            n, repos, bad = len(doc.get("findings") or []), doc.get("scanned", 0), doc.get("failed", 0)
+            title = "Secrets scan finished" if not bad else "Secrets scan incomplete"
+            body = ("%d possible secret%s" % (n, "" if n == 1 else "s") if n
+                    else "No secrets found" if not bad else "Nothing found") + \
+                " in %d repositor%s." % (repos, "y" if repos == 1 else "ies") + \
+                (" %d couldn't be scanned." % bad if bad else "")
     _notify(title, body)
     return 0
 
@@ -1412,20 +1420,28 @@ def leaks_scan(root):
         # The repository is untrusted: its own diff drivers (textconv, external
         # diff) would run a command from its .git/config, so git is told not to
         # use them and reads no user or system config.
-        out = capture(["/usr/bin/gitleaks", "git", "--no-banner", "--redact", "--log-level", "error",
+        # Any other exit than 0 (--exit-code 0 makes findings exit 0 too) is
+        # a scan error: the repository counts as not read, never as clean, and
+        # whatever gitleaks reported before it stopped is still shown. A
+        # timeout or an oversized report is cut short, so it is not parsed.
+        out, rc = capture(["/usr/bin/gitleaks", "git", "--no-banner", "--redact", "--log-level", "error",
                        "--log-opts=--no-textconv --no-ext-diff",
                        "--report-format", "json", "--report-path", "-", "--exit-code", "0",
                        "--timeout", "300", "--", repo], timeout=320, cap=16 << 20,
                       extra_env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
-                                 "GIT_ATTR_NOSYSTEM": "1"})
-        try:
-            items = json.loads(out) if out.strip() else []
-        except ValueError:
-            items = None
-        if not isinstance(items, list):
+                                 "GIT_ATTR_NOSYSTEM": "1"}, failed=None, with_status=True)
+        items = None
+        if out is not None:
+            try:
+                items = json.loads(out) if out.strip() else ([] if rc == 0 else None)
+            except ValueError:
+                items = None
+        if rc != 0 or not isinstance(items, list):
             failed += 1
+        else:
+            scanned += 1
+        if not isinstance(items, list):
             continue
-        scanned += 1
         rel = os.path.relpath(repo, root)
         for it in items[:200]:
             if not isinstance(it, dict) or len(findings) >= 200:
@@ -1562,7 +1578,11 @@ def _deep_summary(parts, started, skipped):
             continue
         if name == "leaks":
             n = len(doc.get("findings") or [])
-            said.append("%d possible secret%s" % (n, "" if n == 1 else "s") if n else "no secrets found")
+            if doc.get("failed") and not n:
+                said.append("secrets scan incomplete (%d repositor%s couldn't be scanned)"
+                            % (doc["failed"], "y" if doc["failed"] == 1 else "ies"))
+            else:
+                said.append("%d possible secret%s" % (n, "" if n == 1 else "s") if n else "no secrets found")
         else:
             n = doc.get("packages", 0)
             if doc.get("failed") and not n:
