@@ -322,17 +322,19 @@ systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
 ```
 
 Inside that service, Keepwell first lists the regular files the scan will
-reach into a private file list (symlinks are not followed, and a file whose
-name contains a control character is left out and counted), then runs
+reach into a private file list (symlinks are not followed; a file whose name
+contains a control character, and a folder Keepwell can't open or read to
+the end, are left out and counted), then runs
 `/usr/bin/clamscan --infected --verbose --file-list=<list>` and counts its
 `Scanning <file>` lines. Every two seconds it writes how far it has got to
 `progress-clamscan.json`, which the window shows as a bar with an estimate of
 the time left. The per-file lines are not kept: the log holds only the files
-found, clamscan's summary, and two lines Keepwell adds after it: how many
-files were left out, and clamscan's exit status. A scan only counts as clean
-when clamscan exited 0 or 1, its summary reports no errors and no file was
-left out. A file clamscan couldn't read (it then exits 2 after a normal
-summary), an error exit or a missing status shows the scan as incomplete
+found, clamscan's summary, and the lines Keepwell adds after it: how many
+files and folders were left out, and clamscan's exit status. A scan only
+counts as clean when clamscan exited 0 or 1, its summary reports no errors
+and nothing was left out. A folder that couldn't be listed (its files never
+reach clamscan), a file clamscan couldn't read (it then exits 2 after a
+normal summary), an error exit or a missing status shows the scan as incomplete
 in the check, the notification and the deep-scan summary, never as
 "nothing found". The secrets and dependency scans report progress the same
 way, one repository at a time.

@@ -24,10 +24,12 @@ Time: 4.637 sec (0 m 4 s)
 """
 
 
-def log(files=2, infected=0, errors=0, rc=0, odd=0, found=""):
+def log(files=2, infected=0, errors=0, rc=0, odd=0, unread=0, found=""):
     text = found + SUMMARY % (files, infected, "Total errors: %d\n" % errors if errors else "")
     if odd:
         text += "Keepwell: %d file(s) with control characters in their names were not scanned\n" % odd
+    if unread:
+        text += "Keepwell: %d folder(s) or file(s) couldn't be read and were not scanned\n" % unread
     if rc is not None:
         text += "Keepwell: clamscan exit status %d\n" % rc
     return text
@@ -41,6 +43,7 @@ cases = [
     ("exit 2, no error count", log(rc=2), False),
     ("killed after summary", log(rc=-15), False),
     ("names skipped", log(odd=3), False),
+    ("folder couldn't be listed", log(unread=1), False),
     ("no status line (older log)", log(rc=None), False),
     ("no summary", "Scanning /home/u/a\n", False),
     # A status line before the last summary must not answer for it.
@@ -58,6 +61,42 @@ for name, text, want in cases:
 o = keepwell_av.outcome(log(files=1, errors=1, rc=2))
 if keepwell_av.incomplete_text(o) != "1 file couldn't be read":
     bad.append("reason text: %r" % keepwell_av.incomplete_text(o))
+
+# The listing itself: an unreadable folder below the scanned one is counted,
+# so its files are never silently missing from a "complete" scan.
+import io, os, runpy, tempfile  # noqa: E402
+if os.geteuid() != 0:
+    run = runpy.run_path(str(Path(__file__).resolve().parent.parent / "bin" / "keepwell-run"), run_name="keepwell_run")
+    with tempfile.TemporaryDirectory() as root:
+        os.makedirs(os.path.join(root, "locked", "inner"))
+        os.makedirs(os.path.join(root, "skipme"))
+        for rel in ("a.txt", "locked/inner/b.txt", "skipme/c.txt"):
+            open(os.path.join(root, rel), "w").close()
+        os.symlink("/etc/passwd", os.path.join(root, "link"))
+        listing = io.BytesIO()
+        got = run["_list_files"](root, [os.path.join(root, "skipme")], listing)
+        if got != (2, 0, 0) or listing.getvalue().count(b"\n") != 2:
+            bad.append("readable tree: %r" % (got,))
+        os.chmod(os.path.join(root, "locked"), 0)
+        try:
+            listing = io.BytesIO()
+            got = run["_list_files"](root, [os.path.join(root, "skipme")], listing)
+            if got != (1, 0, 1):
+                bad.append("unreadable folder: got %r, want (1, 0, 1)" % (got,))
+            got = run["_list_files"](os.path.join(root, "missing"), [], io.BytesIO())
+            if got != (0, 0, 1):
+                bad.append("missing root: got %r, want (0, 0, 1)" % (got,))
+        finally:
+            os.chmod(os.path.join(root, "locked"), 0o700)
+
+        class Full(io.BytesIO):
+            def write(self, b):
+                raise OSError(28, "No space left on device")
+        try:
+            run["_list_files"](root, [], Full())
+            bad.append("a failed write to the file list was swallowed")
+        except OSError:
+            pass
 
 if bad:
     print("\n".join(bad))
