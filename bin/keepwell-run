@@ -1077,30 +1077,52 @@ CONTROL = re.compile(rb"[\x00-\x1f\x7f]")
 def _list_files(root, skip, out):
     """Writes the regular files under root that clamscan should read (it
     follows no symlinks below the folder it's given) to out, one path per
-    line, and returns (listed, unscannable). A path with a line break or
-    other control character is never listed: clamscan echoes paths verbatim,
-    so such a name could write lines of its own into the scan log."""
-    listed, odd, stack = 0, 0, [root]
+    line, and returns (listed, unscannable, unreadable). A path with a line
+    break or other control character is never listed: clamscan echoes paths
+    verbatim, so such a name could write lines of its own into the scan log.
+
+    unreadable counts the folders that couldn't be opened or read to the
+    end, and the entries whose type couldn't be read: whatever is under them
+    never reaches clamscan, so the scan must not count as complete. Only a
+    folder or entry that disappeared after it was listed (ENOENT below the
+    root) is not counted, since there is nothing left there to scan. A
+    failed write to the list is not caught here: it stops the scan, which
+    then has no summary and shows as stopped."""
+    listed, odd, unreadable, stack = 0, 0, 0, [root]
     while stack:
+        here, files = stack.pop(), []
         try:
-            with os.scandir(stack.pop()) as it:
+            with os.scandir(here) as it:
                 for e in it:
                     try:
-                        if e.is_dir(follow_symlinks=False):
-                            if e.path not in skip:
-                                stack.append(e.path)
-                        elif e.is_file(follow_symlinks=False):
-                            raw = os.fsencode(e.path)
-                            if CONTROL.search(raw):
-                                odd += 1
-                            else:
-                                out.write(raw + b"\n")
-                                listed += 1
-                    except OSError:
+                        is_dir = e.is_dir(follow_symlinks=False)
+                        is_file = not is_dir and e.is_file(follow_symlinks=False)
+                    except FileNotFoundError:
                         continue
+                    except OSError:
+                        unreadable += 1
+                        continue
+                    if is_dir:
+                        if e.path not in skip:
+                            stack.append(e.path)
+                    elif is_file:
+                        files.append(os.fsencode(e.path))
+        except FileNotFoundError:
+            if here == root:
+                unreadable += 1
         except OSError:
-            continue
-    return listed, odd
+            # Opening it (EACCES) or reading its entries failed: that folder,
+            # or the rest of it, is left out.
+            unreadable += 1
+        # Outside the try above, so a failed write is never mistaken for an
+        # unreadable folder. Files listed before a read error are kept.
+        for raw in files:
+            if CONTROL.search(raw):
+                odd += 1
+            else:
+                out.write(raw + b"\n")
+                listed += 1
+    return listed, odd, unreadable
 
 
 def clam_scan(target):
@@ -1115,7 +1137,7 @@ def clam_scan(target):
     listfile = keepwell_state.new_filelist(target)
     lfd = os.open(listfile, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(lfd, "wb") as lst:
-        total, odd = _list_files(path, skip, lst)
+        total, odd, unreadable = _list_files(path, skip, lst)
     _progress("clamscan", started, 0, total)
     log = keepwell_state.new_log(target)
     argv = ["/usr/bin/clamscan", "--infected", "--verbose", "--file-list=" + listfile]
@@ -1135,9 +1157,12 @@ def clam_scan(target):
         rc = proc.wait()
         # Written after clamscan's summary, so keepwell_av.outcome reads them
         # with it: a scan with errors (an unreadable file makes clamscan exit
-        # 2 after a normal summary) is never shown as clean.
+        # 2 after a normal summary), or one that never reached a folder, is
+        # never shown as clean.
         if odd:
             out.write(b"Keepwell: %d file(s) with control characters in their names were not scanned\n" % odd)
+        if unreadable:
+            out.write(b"Keepwell: %d folder(s) or file(s) couldn't be read and were not scanned\n" % unreadable)
         out.write(b"Keepwell: clamscan exit status %d\n" % rc)
     # 0 nothing found, 1 something found; anything else is clamscan's error.
     return 0 if rc in (0, 1) else rc
@@ -1334,10 +1359,12 @@ def notify(kind, quiet=False):
             took = (" in %d min" % round(float(secs.group(1)) / 60)) if secs and float(secs.group(1)) >= 90 \
                 else (" in %d s" % round(float(secs.group(1)))) if secs else ""
             title = "Virus scan finished" if o["complete"] else "Virus scan incomplete"
-            body = "%s: %s, %s files checked%s." % (
+            checked = ("%s file%s checked" % (files.group(1), "" if files.group(1) == "1" else "s")) if files \
+                else "? files checked"
+            body = "%s: %s, %s%s." % (
                 where, ("%d infected file%s found" % (n, "" if n == 1 else "s")) if n
                 else "nothing found" if o["complete"] else "nothing found in the files it could read",
-                files.group(1) if files else "?", took)
+                checked, took)
             if not o["complete"]:
                 why = keepwell_av.incomplete_text(o)
                 body += " " + why[0].upper() + why[1:] + "."

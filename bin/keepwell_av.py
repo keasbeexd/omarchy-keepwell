@@ -37,23 +37,28 @@ def summary(log):
 STATUS = re.compile(r"(?m)^Keepwell: clamscan exit status (-?\d+)$")
 ERRORS = re.compile(r"(?m)^Total errors: (\d+)$")
 UNLISTED = re.compile(r"(?m)^Keepwell: (\d+) file\(s\) with control characters in their names were not scanned$")
+UNREAD = re.compile(r"(?m)^Keepwell: (\d+) folder\(s\) or file\(s\) couldn't be read and were not scanned$")
 
 
 def outcome(log):
-    """How a scan log ended: {finished, complete, rc, errors, unscanned}.
-    finished: clamscan printed its final summary. complete: it also exited 0
-    or 1 with no errors, and every listed file was handed to it. Anything
-    else (a file it couldn't read, an exit status of 2, a log from before
-    Keepwell recorded the status) is never reported as a clean scan. Only
-    lines after the last summary count: clamscan's own, then the two that
-    Keepwell writes after it exits. Paths in the log are absolute, so no
-    file name can start one of these lines."""
+    """How a scan log ended: {finished, complete, rc, errors, unscanned,
+    unreadable}. finished: clamscan printed its final summary. complete: it
+    also exited 0 or 1 with no errors, and listing the folder reached every
+    file in it. Anything else (a file clamscan couldn't read, a folder
+    Keepwell couldn't list, an exit status of 2, a log from before Keepwell
+    recorded the status) is never reported as a clean scan. Only lines
+    after the last summary count: clamscan's own, then the ones Keepwell
+    writes after it exits. Paths in the log are absolute, so no file name
+    can start one of these lines."""
     tail = summary(log)
-    rc, errors, odd = STATUS.search(tail), ERRORS.search(tail), UNLISTED.search(tail)
+    rc, errors = STATUS.search(tail), ERRORS.search(tail)
+    odd, unread = UNLISTED.search(tail), UNREAD.search(tail)
     out = {"finished": bool(tail), "rc": int(rc.group(1)) if rc else None,
            "errors": int(errors.group(1)) if errors else 0,
-           "unscanned": int(odd.group(1)) if odd else 0}
-    out["complete"] = out["finished"] and out["rc"] in (0, 1) and not out["errors"] and not out["unscanned"]
+           "unscanned": int(odd.group(1)) if odd else 0,
+           "unreadable": int(unread.group(1)) if unread else 0}
+    out["complete"] = (out["finished"] and out["rc"] in (0, 1) and not out["errors"]
+                       and not out["unscanned"] and not out["unreadable"])
     return out
 
 
@@ -62,6 +67,8 @@ def incomplete_text(o):
     why = []
     if o["errors"]:
         why.append("%d file%s couldn't be read" % (o["errors"], "" if o["errors"] == 1 else "s"))
+    if o["unreadable"]:
+        why.append("%d folder%s couldn't be listed" % (o["unreadable"], "" if o["unreadable"] == 1 else "s"))
     if o["unscanned"]:
         why.append("%d file%s with unusual names skipped" % (o["unscanned"], "" if o["unscanned"] == 1 else "s"))
     if not why:
