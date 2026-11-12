@@ -141,7 +141,8 @@ def text(argv, **kw):
 
 
 def unit_state(unit):
-    """(enabled, active) for a system unit, as systemctl's own words."""
+    """(enabled, active) for a system unit, as systemctl's own words, or
+    "unknown" for either when systemctl gave no answer."""
     _, en = text(["/usr/bin/systemctl", "is-enabled", "--", unit], timeout=3, cap=256)
     _, ac = text(["/usr/bin/systemctl", "is-active", "--", unit], timeout=3, cap=256)
     return clean(en.strip(), 20) or "unknown", clean(ac.strip(), 20) or "unknown"
@@ -149,11 +150,12 @@ def unit_state(unit):
 
 # ---------------------------------------------------------------- bounded files
 
-def read_file(path, cap, user_owned=False, tail=False):
+def read_file(path, cap, user_owned=False, tail=False, root_owned=False):
     """Read up to `cap` bytes through one descriptor. Returns bytes or None.
 
     user_owned: the file must belong to us and not be hard-linked; files in
     root-owned system directories are only required to be regular files.
+    root_owned: the file must belong to root and be writable by no one else.
     tail: read the last `cap` bytes instead of refusing a larger file.
     """
     try:
@@ -165,6 +167,8 @@ def read_file(path, cap, user_owned=False, tail=False):
         if not stat.S_ISREG(st.st_mode):
             return None
         if user_owned and (st.st_uid != UID or st.st_nlink != 1):
+            return None
+        if root_owned and (st.st_uid != 0 or st.st_mode & 0o022):
             return None
         if st.st_size > cap:
             if not tail:
@@ -305,10 +309,15 @@ def probe_audit(network):
         p["error"] = True
         return p
     counts = dict.fromkeys(SEVERITIES, 0)
-    packages = []
+    packages, unparsed = [], 0
     for line in out.splitlines():
+        if not line.strip():
+            continue
         parts = line.split("\t")
         if len(parts) != 5 or not re.fullmatch(r"[A-Za-z0-9@._+-]{1,128}", parts[0]):
+            # A line Keepwell can't read is counted, never dropped: if
+            # arch-audit's format changed, "no known issues" would be wrong.
+            unparsed += 1
             continue
         word = parts[1].replace(" risk", "").strip()
         sev = word if word in SEVERITIES else "Unknown"
@@ -319,7 +328,7 @@ def probe_audit(network):
             packages.append({"name": clean(parts[0], 64), "severity": sev, "kinds": kinds[:4],
                              "fixed": fixed if re.fullmatch(r"[A-Za-z0-9.:+~_-]{1,64}", fixed) else "",
                              "cves": len(re.findall(r"CVE-\d{4}-\d{4,7}", parts[4]))})
-    p.update(ran=True, counts=counts, packages=packages, at=int(time.time()))
+    p.update(ran=True, counts=counts, packages=packages, unparsed=unparsed, at=int(time.time()))
     try:
         keepwell_state.write("audit.json", json.dumps(p, separators=(",", ":")).encode())
     except (OSError, ValueError):
@@ -488,7 +497,10 @@ def probe_permissions():
     p = {"flatpak": exists("/usr/bin/flatpak"), "flatseal": False, "apps": 0}
     if not p["flatpak"]:
         return p
-    _, out = text(["/usr/bin/flatpak", "list", "--app", "--columns=application"], timeout=8, cap=256 * 1024)
+    rc, out = text(["/usr/bin/flatpak", "list", "--app", "--columns=application"], timeout=8, cap=256 * 1024)
+    if rc != 0:
+        # Not "no apps": the list couldn't be read.
+        return {"error": True}
     ids = [l.strip() for l in out.splitlines() if re.fullmatch(r"[A-Za-z0-9._-]{3,255}", l.strip())]
     p["apps"] = len(ids)
     p["flatseal"] = "com.github.tchx84.Flatseal" in ids
@@ -727,7 +739,12 @@ def probe_network_privacy():
     p["hosts"] = {"blocked": len(sunk), "total": len(TELEMETRY_HOSTS),
                   "blackOps": BLACK_OPS_HOSTS_MARK in hosts, "keepwell": b"# BEGIN keepwell" in hosts}
 
-    if unit_state("systemd-resolved.service")[1] == "active":
+    states = {u: unit_state(u)[1] for u in ("systemd-resolved.service", "NetworkManager.service", "avahi-daemon.service")}
+    if "unknown" in states.values():
+        # Without systemctl's answer a protection would silently drop out of
+        # the list instead of being reported.
+        return {"error": True}
+    if states["systemd-resolved.service"] == "active":
         _, cfg = text(["/usr/bin/systemd-analyze", "cat-config", "systemd/resolved.conf"], timeout=4, cap=256 * 1024)
         value = _ini(cfg).get("Resolve.FallbackDNS")
         p["fallbackDns"] = "default" if value is None else ("off" if value == "" else "custom")
@@ -736,7 +753,7 @@ def probe_network_privacy():
     else:
         p["fallbackDns"] = None
 
-    if unit_state("NetworkManager.service")[1] == "active":
+    if states["NetworkManager.service"] == "active":
         _, cfg = text(["/usr/bin/NetworkManager", "--print-config"], timeout=4, cap=256 * 1024)
         nm = _ini(cfg)
         enabled = nm.get("connectivity.enabled", "true").lower() not in ("false", "0", "no")
@@ -757,7 +774,7 @@ def probe_network_privacy():
         p["connectivity"] = None
         p["identity"] = None
 
-    if unit_state("avahi-daemon.service")[1] == "active":
+    if states["avahi-daemon.service"] == "active":
         conf = (read_file("/etc/avahi/avahi-daemon.conf", 256 * 1024) or b"").decode("utf-8", "replace")
         p["avahiAnnounces"] = _ini(conf).get("publish.disable-publishing", "no").lower() != "yes"
         p["avahiBlackOps"] = "black-ops" in conf
@@ -813,6 +830,25 @@ def probe_unclaimed():
             "launchers": len(keepwell_unclaimed.broken_launchers())}
 
 
+def _sshd_file(path):
+    """A file sshd reads, as root-owned bytes, or None. sshd follows
+    symlinks (systemd links 20-systemd-userdb.conf into /usr/lib), so one is
+    followed here too, but only when the link is root's and points into
+    /etc or /usr, and the file it names is root's and writable by no one
+    else, checked on the open descriptor."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        if st.st_uid != 0:
+            return None
+        path = os.path.realpath(path)
+        if not path.startswith(("/etc/", "/usr/")):
+            return None
+    return read_file(path, 64 * 1024, root_owned=True)
+
+
 def _sshd_settings():
     """The settings sshd would use: drop-ins included where `Include` names
     them, the first value for each key winning (sshd's own rule), and
@@ -820,32 +856,71 @@ def _sshd_settings():
     want = {"passwordauthentication": "yes", "kbdinteractiveauthentication": "yes",
             "challengeresponseauthentication": None, "permitrootlogin": "prohibit-password", "port": "22"}
     found = {}
+    # Why the result can't be trusted to be complete: a file sshd reads that
+    # Keepwell can't, an Include it doesn't follow, or a Match block that
+    # turns password or root login back on for some connections. With any of
+    # these, "keys only" is never claimed.
+    unsure = []
+
+    def settled():
+        """sshd keeps the first value it reads for each setting, so a file
+        it reads after these are all set can't change what Keepwell reports."""
+        return "passwordauthentication" in found and "permitrootlogin" in found and \
+            ("kbdinteractiveauthentication" in found or "challengeresponseauthentication" in found)
 
     def walk(path, depth):
-        raw = read_file(path, 64 * 1024)
-        if raw is None or depth > 2:
+        if depth > 2:
+            if not settled():
+                unsure.append("an Include nested more than two levels deep")
             return
+        raw = _sshd_file(path)
+        if raw is None:
+            if not settled():
+                unsure.append("%s couldn't be read" % clean(path, 80))
+            return
+        in_match = False
         for line in raw.decode("utf-8", "replace").splitlines():
             parts = line.split("#", 1)[0].split()
             if not parts:
                 continue
             key = parts[0].lower()
             if key == "match":
-                return
+                in_match = True
+                continue
+            if in_match:
+                # Everything after a Match line applies only to the
+                # connections it matches. Keepwell doesn't evaluate them,
+                # but notes any that loosen what it reports.
+                value = parts[1].lower() if len(parts) > 1 else ""
+                if key in ("passwordauthentication", "kbdinteractiveauthentication",
+                           "challengeresponseauthentication") and value == "yes":
+                    unsure.append("a Match block allows passwords for some connections")
+                elif key == "permitrootlogin" and value != "no":
+                    unsure.append("a Match block changes root login for some connections")
+                elif key == "include":
+                    unsure.append("a Match block includes other files")
+                continue
             if key == "include" and len(parts) > 1:
                 for pattern in parts[1:]:
                     pattern = pattern if pattern.startswith("/") else "/etc/ssh/" + pattern
-                    if not pattern.startswith("/etc/ssh/"):
-                        continue
                     folder, glob_part = os.path.split(pattern)
+                    if not pattern.startswith("/etc/ssh/") or any(c in folder for c in "*?[") \
+                            or any(c in glob_part for c in "?["):
+                        unsure.append("an Include Keepwell doesn't follow (%s)" % clean(pattern, 80))
+                        continue
                     try:
-                        names = sorted(os.listdir(folder))[:100]
+                        names = sorted(os.listdir(folder))
+                    except FileNotFoundError:
+                        continue
                     except OSError:
+                        unsure.append("%s couldn't be read" % clean(folder, 80))
                         continue
                     rx = re.compile("^" + re.escape(glob_part).replace("\\*", ".*") + "$")
-                    for name in names:
-                        if rx.match(name):
-                            walk(os.path.join(folder, name), depth + 1)
+                    matched = [n for n in names if rx.match(n)]
+                    if len(matched) > 100:
+                        unsure.append("more than 100 files in %s" % clean(folder, 80))
+                    for name in matched[:100]:
+                        walk(os.path.join(folder, name), depth + 1)
             elif key in want and key not in found and len(parts) > 1:
                 found[key] = parts[1].lower()
 
@@ -853,7 +928,8 @@ def _sshd_settings():
     kbd = found.get("kbdinteractiveauthentication") or found.get("challengeresponseauthentication") or "yes"
     return {"passwords": found.get("passwordauthentication", "yes") == "yes" or kbd == "yes",
             "rootLogin": found.get("permitrootlogin", want["permitrootlogin"]),
-            "port": found.get("port", "22") if re.fullmatch(r"\d{1,5}", found.get("port", "22")) else "22"}
+            "port": found.get("port", "22") if re.fullmatch(r"\d{1,5}", found.get("port", "22")) else "22",
+            "unsure": sorted(set(unsure))[:5]}
 
 
 def probe_remote():
@@ -862,6 +938,10 @@ def probe_remote():
         return p
     p["enabled"], p["active"] = unit_state("sshd.service")
     sock_enabled, sock_active = unit_state("sshd.socket")
+    if "unknown" in (p["enabled"], p["active"], sock_enabled, sock_active):
+        # systemctl gave no answer: whether SSH is running is unknown, which
+        # must not read as "no remote login running".
+        return {"error": True}
     p["socket"] = sock_enabled == "enabled" or sock_active == "active"
     p.update(_sshd_settings())
     rules = b"".join(read_file(f, 1 << 20) or b"" for f in ("/etc/ufw/user.rules", "/etc/ufw/user6.rules"))
@@ -873,19 +953,24 @@ def probe_remote():
 
 
 def probe_failed():
-    units = []
+    units, more = [], 0
     for scope in ([], ["--user"]):
-        _, out = text(["/usr/bin/systemctl"] + scope + ["list-units", "--state=failed", "--output=json", "--no-pager"],
-                      timeout=5, cap=256 * 1024)
+        rc, out = text(["/usr/bin/systemctl"] + scope + ["list-units", "--state=failed", "--output=json", "--no-pager"],
+                       timeout=5, cap=256 * 1024)
+        # systemctl that didn't answer, or answered with something that isn't
+        # a list, means "couldn't check", never "nothing failed".
         try:
-            items = json.loads(out) if out.strip() else []
+            items = json.loads(out) if rc == 0 else None
         except ValueError:
-            items = []
-        for it in items[:30] if isinstance(items, list) else []:
+            items = None
+        if not isinstance(items, list):
+            return {"error": True}
+        more += max(0, len(items) - 30)
+        for it in items[:30]:
             unit = str((it or {}).get("unit", ""))
             if re.fullmatch(r"[A-Za-z0-9@._:\\-]{1,128}\.(service|socket|path|timer|mount|target|swap|automount|slice|scope)", unit):
                 units.append({"unit": unit, "user": bool(scope), "description": clean(str(it.get("description", "")), 100)})
-    return {"units": units[:30]}
+    return {"units": units[:30], "more": more + max(0, len(units) - 30)}
 
 
 FINDINGS_BUDGET = 16 * 1024      # bytes of JSON per scanner's findings

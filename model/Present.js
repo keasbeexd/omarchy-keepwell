@@ -183,6 +183,11 @@ function audit(p, net, now) {
     actions: [{ label: "Check now", primary: true, run: "network" }] })
 
   var pkgs = p.packages || []
+  // Lines of arch-audit's output Keepwell couldn't read are never taken as
+  // "no known issues".
+  if (p.unparsed > 0 && !pkgs.length) return check(b, { kind: "attn", status: "Couldn't read arch-audit's report",
+    meta: plural(p.unparsed, "line", "lines") + " in a format Keepwell doesn't know", note: note,
+    actions: [{ label: "Check again", primary: true, run: "network" }, { label: "Arch security tracker ↗", url: "https://security.archlinux.org/" }] })
   var fixable = pkgs.filter(function(x) { return x.fixed })
   var seriousFix = fixable.filter(function(x) { return x.severity === "Critical" || x.severity === "High" })
   var seriousOpen = pkgs.filter(function(x) { return !x.fixed && (x.severity === "Critical" || x.severity === "High") })
@@ -197,6 +202,7 @@ function audit(p, net, now) {
     return f
   })
   if (pkgs.length === 0) facts.push(fact("Packages", "No known issues"))
+  if (p.unparsed > 0) facts.push(fact("Unread", plural(p.unparsed, "line", "lines") + " of arch-audit's report Keepwell couldn't read"))
   facts.unshift(fact("Checked", ago(p.at, now), stamp(p.at)))
 
   // Only a released fix is something to act on. An open issue with no fix
@@ -241,6 +247,9 @@ function antivirus(p, now) {
           : last.incomplete ? "incomplete" : "nothing found"))])
   // A scan clamscan finished with errors is never shown as clean.
   var incomplete = !p.scanning && last && last.finished && last.incomplete ? last.incomplete : ""
+  // A scan that never reached its summary (stopped, or failed partway)
+  // checked nothing you can rely on, so it is never shown as fine either.
+  var stopped = !p.scanning && last && !last.finished
   if (incomplete) facts.push(fact("Incomplete", incomplete))
   var found = last && last.finished && last.infected ? last.found || [] : []
   for (var i = 0; i < found.length; i++) facts.push(fact(i === 0 ? "Found" : "", found[i]))
@@ -258,11 +267,13 @@ function antivirus(p, now) {
   if (!auto) actions.push({ label: "Turn on auto-update", primary: !p.scanning && !found.length, elevated: true, act: "freshclam-on" })
   if (p.allowed) actions.push({ label: "Stop ignoring " + plural(p.allowed, "file", "files"), unignore: "virus" })
   return check(b, {
-    kind: found.length ? "crit" : stale || incomplete ? "attn" : "good",
+    kind: found.length ? "crit" : stale || incomplete || stopped ? "attn" : "good",
     status: p.scanning ? "Scanning in the background…"
       : found.length ? plural(found.length, "infected file", "infected files") + " found"
       : age === null ? "No virus definitions yet"
-      : incomplete ? "The last virus scan was incomplete" : stale ?"Virus definitions are " + age + " days old" : "Definitions are up to date",
+      : incomplete ? "The last virus scan was incomplete"
+      : stopped ? "The last virus scan stopped before the end"
+      : stale ? "Virus definitions are " + age + " days old" : "Definitions are up to date",
     meta: p.scanning ? (progress ? progress.text : "You'll get a notification when it's done")
       : last ? "Scanned " + ago(last.at, now) + " · " + where(last.target) : "No scans yet",
     progress: progress,
@@ -369,6 +380,11 @@ function remote(p) {
     ? [off].concat(p.keepwellKeysOnly ? [{ label: "Allow passwords again…", elevated: true, act: "ssh-keys-only-off" }] : [])
     : p.authorizedKeys > 0 ? [{ label: "Allow keys only…", primary: true, elevated: true, act: "ssh-keys-only" }, off]
     : [{ label: "Turn off SSH…", primary: true, elevated: true, act: "ssh-off" }]
+  // Keys only is claimed only when Keepwell read everything sshd reads.
+  var unsure = Array.isArray(p.unsure) ? p.unsure : []
+  if (keysOnly && unsure.length) return check(b, { kind: "attn", status: "SSH is on; Keepwell couldn't confirm keys only",
+    meta: unsure[0], facts: facts.concat([fact("Not checked", unsure.join(" · "))]),
+    note: "sudo sshd -T shows the settings sshd actually uses.", actions: actions })
   if (keysOnly) return check(b, { kind: "good", status: "SSH is on, keys only", meta: "Port " + (p.port || "22"),
     facts: facts, actions: actions })
   return check(b, { kind: p.rootLogin === "yes" ? "crit" : "attn",
@@ -377,6 +393,19 @@ function remote(p) {
     note: p.authorizedKeys > 0 ? "Keys only: the new setting is tested before SSH reloads, and an SSH session you have open stays open."
       : "To allow keys only, first add your public key to ~/.ssh/authorized_keys (ssh-copy-id from the other computer), so you don't lock yourself out.",
     actions: actions })
+}
+
+// Why a secrets or dependency scan didn't cover its whole folder (see
+// find_repos in bin/keepwell-run), or "" when it did.
+function searchGap(last) {
+  var why = []
+  if (typeof last.unlisted === "number" && last.unlisted > 0)
+    why.push(plural(last.unlisted, "folder", "folders") + " couldn't be searched")
+  if (last.cut === "limit") why.push("the search stopped at 100 repositories")
+  else if (last.cut === "time") why.push("the search for repositories ran out of time")
+  else if (last.cut === "entries") why.push("a folder with over 2,000 entries was only partly searched")
+  else if (last.cut) why.push("the search stopped early")
+  return why.join(", ")
 }
 
 function leaks(tools, now) {
@@ -398,19 +427,21 @@ function leaks(tools, now) {
   var f = last.findings || []
   var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder), scannedFact(last.at, now),
                fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
+  var gap = searchGap(last)
+  if (gap) facts.push(fact("Not searched", gap))
   for (var i = 0; i < Math.min(f.length, 30); i++)
     facts.push(fact(f[i].repo, f[i].file + (f[i].line ? ":" + f[i].line : ""), f[i].rule + (f[i].commit ? " · " + f[i].commit : "")))
-  // A repository gitleaks couldn't finish (error, timeout, huge report) is
-  // never counted as clean.
-  if (last.failed && !f.length) return check(b, { kind: "attn",
-    status: last.scanned ? "Only " + last.scanned + " of " + (last.scanned + last.failed) + " repositories could be scanned"
-      : "Couldn't scan your repositories",
-    meta: "gitleaks stopped with an error or ran out of time — scan again",
+  // A repository gitleaks couldn't finish (error, timeout, huge report), or
+  // a part of the folder the search never reached, is never counted as clean.
+  if ((last.failed || gap) && !f.length) return check(b, { kind: "attn",
+    status: last.failed ? (last.scanned ? "Only " + last.scanned + " of " + (last.scanned + last.failed) + " repositories could be scanned"
+      : "Couldn't scan your repositories") : "The last secrets scan was incomplete",
+    meta: last.failed ? "gitleaks stopped with an error or ran out of time — scan again" : gap,
     facts: facts,
     actions: [{ label: "Scan again", primary: true, rescan: "leaks", folder: last.folder }]
       .concat(last.folder === "~" ? [choose] : [home, choose]) })
   return check(b, { kind: f.length ? "attn" : "good",
-    status: f.length ? plural(f.length, "possible secret", "possible secrets") + " in your repositories"
+    status: f.length ? (last.capped ? "At least " : "") + plural(f.length, "possible secret", "possible secrets") + " in your repositories"
       : last.repos ? "No secrets found" : "No git repositories in that folder",
     meta: "Scanned " + ago(last.at, now) + " · " + plural(last.repos, "repository", "repositories"),
     facts: facts,
@@ -469,17 +500,19 @@ function deps(tools, now) {
     if (x.vulns && x.vulns[0] && /^[A-Za-z0-9._:-]{1,64}$/.test(x.vulns[0].id)) row.url = "https://osv.dev/vulnerability/" + x.vulns[0].id
     facts.push(row)
   }
-  // A project osv-scanner couldn't check (offline, OSV.dev unreachable) is
-  // never counted as clean.
-  if (last.failed && !f.length) return check(b, { kind: "attn",
-    status: last.scanned ? "Only " + last.scanned + " of " + (last.scanned + last.failed) + " projects could be checked"
-      : "Couldn't check your projects",
-    meta: "osv-scanner couldn't reach OSV.dev, or stopped — check your connection and scan again",
+  // A project osv-scanner couldn't check (offline, OSV.dev unreachable), or
+  // a part of the folder the search never reached, is never counted as clean.
+  var gap = searchGap(last)
+  if (gap) facts.splice(3, 0, fact("Not searched", gap))
+  if ((last.failed || gap) && !f.length) return check(b, { kind: "attn",
+    status: last.failed ? (last.scanned ? "Only " + last.scanned + " of " + (last.scanned + last.failed) + " projects could be checked"
+      : "Couldn't check your projects") : "The last dependency scan was incomplete",
+    meta: last.failed ? "osv-scanner couldn't reach OSV.dev, or stopped — check your connection and scan again" : gap,
     facts: facts, note: network,
     actions: [{ label: "Scan again", primary: true, rescan: "osv", folder: last.folder }]
       .concat(last.folder === "~" ? [choose] : [home, choose]) })
   return check(b, {
-    kind: fixable.length || last.failed ? "attn" : f.length ? "info" : "good",
+    kind: fixable.length || last.failed || gap ? "attn" : f.length ? "info" : "good",
     status: f.length ? plural(f.length, "dependency has", "dependencies have") + " known vulnerabilities"
       : !last.scanned ? "No projects found in that folder"
       : last.noLockfiles >= last.scanned ? "Nothing to check: no dependency files in " + plural(last.scanned, "project", "projects")
@@ -803,8 +836,9 @@ function schedules(doc, now) {
 function failed(p) {
   var b = CATALOG.failed
   var units = Array.isArray(p.units) ? p.units : []
+  var more = typeof p.more === "number" && p.more > 0 ? p.more : 0
   if (!units.length) return check(b, { kind: "good", status: "All services are running" })
-  return check(b, { kind: "info", status: plural(units.length, "service has failed", "services have failed"),
+  return check(b, { kind: "info", status: plural(units.length + more, "service has failed", "services have failed"),
     meta: [[units.filter(function(u) { return !u.user }).length, "system"], [units.filter(function(u) { return u.user }).length, "yours"]]
       .filter(function(x) { return x[0] }).map(function(x) { return x[0] + " " + x[1] }).join(" · "),
     facts: units.map(function(u) { return fact(u.user ? "Yours" : "System", u.description || u.unit, u.unit) }),
@@ -869,8 +903,10 @@ function build(doc, now) {
         clean: "cleanup", unclaimed: "unclaimed", snap: "snapshots", disk: "disk", failed: "failed" }[id]
       var probe = probeName ? probes[probeName] : null
       if (probe && (probe.error === true && id !== "audit" && id !== "cam" || probe.skipped))
-        return check(CATALOG[id], { kind: "off", status: "Couldn't check this time", meta: "Try Refresh" })
-      try { return makers[id]() } catch (e) { return check(CATALOG[id], { kind: "off", status: "Couldn't check this time" }) }
+        // A check that couldn't run is something to look at, never an
+        // optional check that is merely off: "looks good" must not hide it.
+        return check(CATALOG[id], { kind: "attn", status: "Couldn't check this time", meta: "Try Refresh" })
+      try { return makers[id]() } catch (e) { return check(CATALOG[id], { kind: "attn", status: "Couldn't check this time", meta: "Try Refresh" }) }
     })
     out.push({ id: s.id, name: s.name, checks: checks, hero: probes ? hero(s, checks) : {
       crit: ["", ""], attn: ["", ""], good: ["Checking…", "Reading your system's state. Nothing is changed."] } })

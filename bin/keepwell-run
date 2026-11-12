@@ -1297,7 +1297,7 @@ def osv_scan(root):
     huge folder can't stall the rest; a summary of what was found is kept."""
     started = int(time.time())
     _progress("osv", started, 0, None)
-    repos = find_repos(root)
+    repos, gaps = find_repos(root)
     findings, scanned, failed, empty = [], 0, 0, 0
     for n, repo in enumerate(repos):
         _progress("osv", started, n, len(repos))
@@ -1326,7 +1326,8 @@ def osv_scan(root):
     findings.sort(key=lambda f: (SEVERITY_ORDER[f["severity"]], not f["fixable"]))
     summary = {"at": started, "folder": root.replace(HOME, "~", 1)[:200], "repos": len(repos),
                "scanned": scanned, "failed": failed, "noLockfiles": empty,
-               "packages": len(findings), "findings": findings[:100], "finished": True}
+               "packages": len(findings), "findings": findings[:100], "finished": True,
+               "unlisted": gaps["unlisted"], "cut": gaps["cut"]}
     keepwell_state.write("osv.json", json.dumps(summary, separators=(",", ":")).encode())
     return 0
 
@@ -1394,21 +1395,26 @@ def notify(kind, quiet=False, since=None):
         else:
             n = doc.get("packages", 0)
             fixable = sum(1 for f in doc.get("findings") or [] if f.get("fixable"))
-            title = "Dependency scan finished" if not doc.get("failed") else "Dependency scan incomplete"
+            gap = search_gap_text(doc)
+            title = "Dependency scan finished" if not doc.get("failed") and not gap else "Dependency scan incomplete"
             body = ("%d package%s with known vulnerabilities (%d fixable)" % (n, "" if n == 1 else "s", fixable)
-                    if n else "No known vulnerabilities") + " in %d project%s." % (doc.get("scanned", 0), "" if doc.get("scanned", 0) == 1 else "s") \
-                + (" %d couldn't be checked (offline?)." % doc["failed"] if doc.get("failed") else "")
+                    if n else "No known vulnerabilities" if not gap else "Nothing found") \
+                + " in %d project%s." % (doc.get("scanned", 0), "" if doc.get("scanned", 0) == 1 else "s") \
+                + (" %d couldn't be checked (offline?)." % doc["failed"] if doc.get("failed") else "") \
+                + (" " + gap[0].upper() + gap[1:] + "." if gap else "")
     else:
         doc = keepwell_state.read_json("gitleaks.json") or {}
         if not doc.get("finished") or not _this_run(doc.get("at"), since):
             title, body = "Secrets scan stopped", "Stopped before the end."
         else:
             n, repos, bad = len(doc.get("findings") or []), doc.get("scanned", 0), doc.get("failed", 0)
-            title = "Secrets scan finished" if not bad else "Secrets scan incomplete"
-            body = ("%d possible secret%s" % (n, "" if n == 1 else "s") if n
-                    else "No secrets found" if not bad else "Nothing found") + \
+            gap = search_gap_text(doc)
+            title = "Secrets scan finished" if not bad and not gap else "Secrets scan incomplete"
+            body = ("%s%d possible secret%s" % ("at least " if doc.get("capped") else "", n, "" if n == 1 else "s") if n
+                    else "No secrets found" if not bad and not gap else "Nothing found") + \
                 " in %d repositor%s." % (repos, "y" if repos == 1 else "ies") + \
-                (" %d couldn't be scanned." % bad if bad else "")
+                (" %d couldn't be scanned." % bad if bad else "") + \
+                (" " + gap[0].upper() + gap[1:] + "." if gap else "")
     _notify(title, body)
     return 0
 
@@ -1426,23 +1432,48 @@ def find_repos(root, limit=100, seconds=20.0):
     A symlinked folder is followed only when the folder it points to is
     yours (~/Projects -> /mnt/data/Projects is; a link into /, /usr or
     another account's files is not), and each real folder is visited once,
-    so a link loop can't trap the walk or carry it outside your files."""
+    so a link loop can't trap the walk or carry it outside your files.
+
+    Returns (repos, gaps). gaps says what the search couldn't cover, so a
+    scan of what was found is never shown as covering the whole folder:
+    {"unlisted": folders that couldn't be opened or read, "cut": "" or why
+    the search stopped early ("limit", "time", "entries": a folder with
+    more than 2,000 entries was only partly read)}. Hidden, dependency and
+    deeper folders are left out by design and are not gaps."""
     skip = {"node_modules", ".cache", "vendor", ".venv", "venv", "target", "build", "dist"}
     found, deadline, seen = [], time.monotonic() + seconds, set()
+    unlisted, cut = 0, ""
     stack = [(root, 0)]
-    while stack and len(found) < limit and time.monotonic() < deadline:
+    while stack:
+        if len(found) >= limit:
+            cut = "limit"
+            break
+        if time.monotonic() >= deadline:
+            cut = "time"
+            break
         path, depth = stack.pop()
         try:
             st = os.stat(path)
+        except FileNotFoundError:
+            if path == root:
+                unlisted += 1
+            continue
         except OSError:
+            unlisted += 1
             continue
         if (st.st_dev, st.st_ino) in seen:
             continue
         seen.add((st.st_dev, st.st_ino))
         try:
             with os.scandir(path) as it:
-                entries = list(it)[:2000]
+                entries = []
+                for e in it:
+                    if len(entries) >= 2000:
+                        cut = cut or "entries"
+                        break
+                    entries.append(e)
         except OSError:
+            unlisted += 1
             continue
         if any(e.name == ".git" for e in entries):
             found.append(path)
@@ -1458,9 +1489,30 @@ def find_repos(root, limit=100, seconds=20.0):
                 elif e.is_symlink() and e.is_dir(follow_symlinks=True) \
                         and os.stat(e.path).st_uid == os.geteuid():
                     stack.append((e.path, depth + 1))
-            except OSError:
+            except FileNotFoundError:
                 continue
-    return sorted(found)
+            except OSError:
+                unlisted += 1
+    return sorted(found), {"unlisted": unlisted, "cut": cut}
+
+
+def search_gap_text(doc):
+    """Why a secrets or dependency scan didn't cover its whole folder, in a
+    few words, or "" when it did."""
+    why = []
+    n = doc.get("unlisted") if isinstance(doc.get("unlisted"), int) else 0
+    if n:
+        why.append("%d folder%s couldn't be searched" % (n, "" if n == 1 else "s"))
+    cut = doc.get("cut")
+    if cut == "limit":
+        why.append("the search stopped at 100 repositories")
+    elif cut == "time":
+        why.append("the search for repositories ran out of time")
+    elif cut == "entries":
+        why.append("a folder with over 2,000 entries was only partly searched")
+    elif cut:
+        why.append("the search stopped early")
+    return ", ".join(why)
 
 
 def leaks_scan(root):
@@ -1468,8 +1520,8 @@ def leaks_scan(root):
     gitleaks redacts the secrets, and Keepwell keeps none of its text."""
     started = int(time.time())
     _progress("gitleaks", started, 0, None)
-    repos = find_repos(root)
-    findings, scanned, failed = [], 0, 0
+    repos, gaps = find_repos(root)
+    findings, scanned, failed, capped = [], 0, 0, False
     for n, repo in enumerate(repos):
         _progress("gitleaks", started, n, len(repos))
         # The repository is untrusted: its own diff drivers (textconv, external
@@ -1498,9 +1550,15 @@ def leaks_scan(root):
         if not isinstance(items, list):
             continue
         rel = os.path.relpath(repo, root)
+        # At most 200 findings are kept; capped says there were more, so
+        # the count is shown as a lower bound.
+        capped = capped or len(items) > 200
         for it in items[:200]:
-            if not isinstance(it, dict) or len(findings) >= 200:
+            if not isinstance(it, dict):
                 continue
+            if len(findings) >= 200:
+                capped = True
+                break
             findings.append({
                 "repo": rel[:120] if rel != "." else os.path.basename(root)[:120],
                 "file": re.sub(r"[\x00-\x1f\x7f]", "", str(it.get("File", "")))[:160],
@@ -1509,7 +1567,8 @@ def leaks_scan(root):
                 "commit": re.sub(r"[^0-9a-f]", "", str(it.get("Commit", "")))[:8],
             })
     summary = {"at": started, "folder": root.replace(HOME, "~", 1)[:200], "repos": len(repos),
-               "scanned": scanned, "failed": failed, "findings": findings, "finished": True}
+               "scanned": scanned, "failed": failed, "findings": findings, "finished": True,
+               "unlisted": gaps["unlisted"], "cut": gaps["cut"], "capped": capped}
     keepwell_state.write("gitleaks.json", json.dumps(summary, separators=(",", ":")).encode())
     return 0
 
@@ -1603,50 +1662,89 @@ def on_battery():
 
 
 def _wait(unit, limit=12 * 3600):
+    """Wait for unit to stop. False if it is still running at the limit."""
     deadline = time.monotonic() + limit
     while time.monotonic() < deadline:
         if _cap(["/usr/bin/systemctl", "--user", "is-active", unit]).strip() not in ("active", "activating"):
-            return
+            return True
         time.sleep(5)
+    return False
 
 
-def _deep_summary(parts, started, skipped):
+DEEP_LABELS = {"scan-downloads": "virus scan of Downloads", "scan-home": "virus scan of home folder",
+               "leaks": "secrets scan", "osv": "dependencies scan"}
+
+
+def _deep_summary(parts, runs, skipped):
+    """One line for every part of the run, in order. runs: {part: (state,
+    since)} with state "started", "running" (still going at the time limit),
+    "busy" (one was already running), "nofolder" (its folder is gone),
+    "failed" (couldn't be started) or
+    "missing" (its tool isn't installed; skipped says so). A part with no
+    result made by this run (its log or summary couldn't be written, or it
+    never started) is said so, never left out: the summary can't read as
+    clean for a scan that didn't happen."""
     said = list(skipped)
-    if "scan-downloads" in parts or "scan-home" in parts:
-        found = keepwell_state.latest_log()
-        log = found[1].decode("utf-8", "replace") if found and found[1] and _this_run(int(found[0][:10]), started) else ""
-        where = "home folder" if "scan-home" in parts else "Downloads"
-        if not log:
-            pass
-        elif "----------- SCAN SUMMARY -----------" not in log:
-            said.append("virus scan of %s stopped before the end" % where)
-        else:
+    for part in parts:
+        label = DEEP_LABELS.get(part)
+        if label is None:
+            continue
+        state, since = runs.get(part, ("failed", None))
+        if state == "missing":
+            continue
+        if state == "busy":
+            said.append("%s didn't run: another one was still running" % label)
+            continue
+        if state == "failed":
+            said.append("%s couldn't be started" % label)
+            continue
+        if state == "nofolder":
+            said.append("%s didn't run: its folder no longer exists" % label)
+            continue
+        if state == "running":
+            said.append("%s was still running after 12 hours" % label)
+            continue
+        if part in ("scan-downloads", "scan-home"):
+            found = keepwell_state.latest_log(part[5:])
+            if not found or not _this_run(int(found[0][:10]), since):
+                said.append("%s failed: it stopped before it could write its log" % label)
+                continue
+            log = found[1].decode("utf-8", "replace") if found[1] else ""
+            if "----------- SCAN SUMMARY -----------" not in log:
+                said.append("%s stopped before the end" % label)
+                continue
             n, o = _infected(log), keepwell_av.outcome(log)
-            said.append("virus scan of %s: %s" % (where, "%d infected file%s" % (n, "" if n == 1 else "s") if n
-                                                  else "nothing found" if o["complete"]
-                                                  else "incomplete (%s)" % keepwell_av.incomplete_text(o)))
-    for name, label, key in (("leaks", "secrets", "gitleaks.json"), ("osv", "dependencies", "osv.json")):
-        if name not in parts:
+            said.append("%s: %s" % (label, "%d infected file%s" % (n, "" if n == 1 else "s") if n
+                                    else "nothing found" if o["complete"]
+                                    else "incomplete (%s)" % keepwell_av.incomplete_text(o)))
             continue
-        doc = keepwell_state.read_json(key) or {}
-        if not _this_run(doc.get("at"), started) or not doc.get("finished"):
-            if not any(label in s_ for s_ in skipped):
-                said.append("%s scan stopped before the end" % label)
+        doc = keepwell_state.read_json("gitleaks.json" if part == "leaks" else "osv.json") or {}
+        if not _this_run(doc.get("at"), since) or not doc.get("finished"):
+            said.append("%s stopped before the end" % label)
             continue
-        if name == "leaks":
+        gap = search_gap_text(doc)
+        if part == "leaks":
             n = len(doc.get("findings") or [])
-            if doc.get("failed") and not n:
-                said.append("secrets scan incomplete (%d repositor%s couldn't be scanned)"
-                            % (doc["failed"], "y" if doc["failed"] == 1 else "ies"))
+            if n:
+                said.append("%s%d possible secret%s" % ("at least " if doc.get("capped") else "", n, "" if n == 1 else "s")
+                            + (" (scan incomplete: %s)" % gap if gap else ""))
+            elif doc.get("failed") or gap:
+                said.append("secrets scan incomplete (%s)" % ", ".join(
+                    ([("%d repositor%s couldn't be scanned" % (doc["failed"], "y" if doc["failed"] == 1 else "ies"))]
+                     if doc.get("failed") else []) + ([gap] if gap else [])))
             else:
-                said.append("%d possible secret%s" % (n, "" if n == 1 else "s") if n else "no secrets found")
+                said.append("no secrets found")
         else:
             n = doc.get("packages", 0)
-            if doc.get("failed") and not n:
-                said.append("dependencies couldn't be checked (offline?)")
+            if n:
+                said.append("%d dependenc%s with known vulnerabilities" % (n, "y" if n == 1 else "ies")
+                            + (" (scan incomplete: %s)" % gap if gap else ""))
+            elif doc.get("failed") or gap:
+                said.append("dependencies scan incomplete (%s)" % ", ".join(
+                    (["%d project%s couldn't be checked (offline?)" % (doc["failed"], "" if doc["failed"] == 1 else "s")]
+                     if doc.get("failed") else []) + ([gap] if gap else [])))
             else:
-                said.append("%d dependenc%s with known vulnerabilities" % (n, "y" if n == 1 else "ies") if n
-                            else "no vulnerable dependencies")
+                said.append("no vulnerable dependencies")
     text_value = "; ".join(said) or "nothing to scan"
     return text_value[:1].upper() + text_value[1:] + "."
 
@@ -1674,24 +1772,39 @@ def run(kind, scheduled):
     steps = []
     for part in parts:
         if part in ("scan-downloads", "scan-home"):
-            steps.append(("clamscan", lambda p=part: start_scan(p[5:], quiet=True)))
+            steps.append((part, "clamscan", lambda p=part: start_scan(p[5:], quiet=True)))
         elif part == "leaks":
-            steps.append(("gitleaks", lambda: start_leaks(_scan_folder("gitleaks.json"), quiet=True)))
+            steps.append((part, "gitleaks", lambda: start_leaks(_scan_folder("gitleaks.json"), quiet=True)))
         elif part == "osv":
-            steps.append(("osv", lambda: start_osv(_scan_folder("osv.json"), quiet=True)))
-    for unit_kind, start in steps:
+            steps.append((part, "osv", lambda: start_osv(_scan_folder("osv.json"), quiet=True)))
+    # Each part's result is bound to the moment it was started, like the
+    # notification of a scan you start by hand: an earlier log or summary
+    # never answers for it.
+    runs = {}
+    for part, unit_kind, start in steps:
         _wait(UNITS[unit_kind])                 # one you started by hand finishes first
-        result = start()
+        since = int(time.time())
+        try:
+            result = start()
+        except (OSError, subprocess.SubprocessError, ValueError):
+            result = {"started": False}
         if result.get("reason") == "missing":
             skipped.append({"clamscan": "virus scan needs ClamAV", "gitleaks": "secrets scan needs gitleaks",
                             "osv": "dependencies scan needs osv-scanner"}[unit_kind])
-            continue
-        if result.get("started"):
-            _wait(UNITS[unit_kind])
-    summary = _deep_summary(conf["parts"] if parts else [], started, skipped)
+            runs[part] = ("missing", since)
+        elif result.get("started"):
+            runs[part] = ("started" if _wait(UNITS[unit_kind]) else "running", since)
+        else:
+            runs[part] = ({"running": "busy", "folder": "nofolder"}.get(result.get("reason"), "failed"), since)
+    summary = _deep_summary(parts, runs, skipped)
     title = "Keepwell deep scan"
-    keepwell_schedule.save_run(kind, at=started, end=int(time.time()), summary=summary,
-                               **({"slot": slot} if slot else {}))
+    # The notification goes out even when the result can't be saved, and
+    # says so, since the window would otherwise still show the last run.
+    try:
+        keepwell_schedule.save_run(kind, at=started, end=int(time.time()), summary=summary,
+                                   **({"slot": slot} if slot else {}))
+    except (OSError, ValueError):
+        summary += " Keepwell couldn't save this result, so the window still shows the previous run."
     _notify(title, summary)
     return 0
 
