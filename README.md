@@ -317,7 +317,7 @@ and disk priority, one of each kind at a time:
 ```bash
 systemd-run --user --quiet --collect --unit=keepwell-clamscan.service \
   --property=Nice=19 --property=IOSchedulingClass=idle \
-  --property=ExecStopPost=/usr/bin/python3 -I -S <plugin>/bin/keepwell-run notify clamscan \
+  --property=ExecStopPost=/usr/bin/python3 -I -S <plugin>/bin/keepwell-run notify clamscan --since <start> \
   -- /usr/bin/python3 -I -S <plugin>/bin/keepwell-run clam-scan downloads|home
 ```
 
@@ -338,6 +338,13 @@ normal summary), an error exit or a missing status shows the scan as incomplete
 in the check, the notification and the deep-scan summary, never as
 "nothing found". The secrets and dependency scans report progress the same
 way, one repository at a time.
+
+`--since` is the time the scan was started. The notification only reports a
+result made after it: the scan's own log, which is created before anything
+else, or a `gitleaks.json` or `osv.json` written by that run. A scan that
+fails before it writes its result (for example, the file list can't be
+written on a full disk) says it failed or stopped, and an earlier scan's
+result is never announced as this one's.
 
 - **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~` but
   skips `~/.cache`, `~/.local/share/Trash` and Keepwell's own logs. A home
