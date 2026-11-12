@@ -217,18 +217,30 @@ def new_filelist(kind):
         os.close(dirfd)
 
 
-def latest_log():
-    """(name, bytes of its last 64 KiB) of the newest scan log, or None."""
+def latest_log(kind=None):
+    """(name, bytes of its last 64 KiB) of the newest scan log, or of the
+    newest for that folder ("home" or "downloads"), or None. Every entry is
+    looked at (at most 10,000), not a slice of them, so an older log can
+    never stand in for a newer one."""
+    if kind not in (None, "home", "downloads"):
+        raise ValueError("bad kind")
+    pattern = re.compile(r"\d{10}-(home|downloads)\.log" if kind is None else r"\d{10}-%s\.log" % kind)
     dirfd = open_dir("clamav", create=False)
     if dirfd is None:
         return None
+    newest = None
     try:
-        logs = sorted(n for n in os.listdir(dirfd)[:200] if re.fullmatch(r"\d{10}-(home|downloads)\.log", n))
+        with os.scandir(dirfd) as it:
+            for n, entry in enumerate(it):
+                if n >= 10000:
+                    raise OSError("too many entries in the scan log folder")
+                if pattern.fullmatch(entry.name) and (newest is None or entry.name > newest):
+                    newest = entry.name
     finally:
         os.close(dirfd)
-    if not logs:
+    if newest is None:
         return None
-    return logs[-1], read(logs[-1], sub="clamav", cap=64 * 1024)
+    return newest, read(newest, sub="clamav", cap=64 * 1024)
 
 
 # ---------------------------------------------------------------- user config

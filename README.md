@@ -113,7 +113,10 @@ no schedule: they're always on, running once every hour, and also:
   check, arch-audit included — after an action's terminal closes, and when
   a background scan ends.
 
-They take about a second, only read, and change nothing. When a check newly
+They take about a second, only read, and change nothing. A check whose
+command doesn't answer, or whose answer Keepwell can't read, shows
+"Couldn't check this time" as something to review, never as fine or as an
+optional check that is off. When a check newly
 needs attention (Review or Act now), the shield changes and Keepwell sends
 one notification for it — once, until it clears. This is the one thing
 Keepwell does in the background without being asked, and it is local and
@@ -137,7 +140,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 |---|---|---|
 | Software outside updates | names in `~/.local/bin`, `/usr/local/bin`, `~/bin`, `~/go/bin`, `~/.local/share/pipx/venvs`, `~/.local/share/uv/tools`, and `.AppImage` files in `~/Applications`, `~/AppImages`, `~/Downloads`; the first four bytes of each candidate (is it a compiled program?); `~/.cargo/.crates.toml`; the last AUR answer (`aur.json`) | `pacman -Qmq`, `pacman -Qo` (for candidates outside your home), the AUR request (see Network) |
 | Firewall | `/etc/ufw/ufw.conf`, `/etc/default/ufw`, `/etc/ufw/user*.rules` | `systemctl is-enabled/is-active ufw` |
-| Remote access | `/etc/ssh/sshd_config` and its `Include`d drop-ins (port, password and root login settings), `/etc/ufw/user*.rules` (whether the SSH port is allowed); the number of keys in `~/.ssh/authorized_keys` | `systemctl is-enabled/is-active sshd.service sshd.socket` |
+| Remote access | `/etc/ssh/sshd_config` and its `Include`d drop-ins under `/etc/ssh` (port, password and root login settings; sshd's first-value-wins rule; a root-owned symlink into `/etc` or `/usr` is followed, as sshd does), `/etc/ufw/user*.rules` (whether the SSH port is allowed); the number of keys in `~/.ssh/authorized_keys`. "Keys only" is shown only when every file that decides it could be read: an unreadable drop-in before the setting, an `Include` Keepwell doesn't follow, or a `Match` block that allows passwords or changes root login makes it "couldn't confirm keys only". If `systemctl` gives no answer, the check says it couldn't check | `systemctl is-enabled/is-active sshd.service sshd.socket` |
 | Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (hourly and when you ask — see Network); `busctl get-property … NetworkManager Metered` |
 | Antivirus | modification times in `/var/lib/clamav`; the newest of Keepwell's scan logs; the files you marked as not a threat (`av-allowed.json`), each hashed again to check it hasn't changed | `systemctl is-enabled/is-active clamav-freshclam`, `systemctl --user is-active keepwell-clamscan`, `crontab -l` |
 | Secrets in your code | the last scan summary (`gitleaks.json`) | `systemctl --user is-active keepwell-gitleaks` |
@@ -154,7 +157,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 | Snapshots | `/etc/snapper/configs/root` (how many are kept) | `systemctl is-enabled limine-snapper-sync`; `journalctl -u limine-snapper-sync -g CREATE,ISDIR -n 1` — the snapshot list is root-only, but the boot-menu sync service logs each new snapshot's number, and the journal is readable without root |
 | Unclaimed files | names in `/usr/bin`, `~/.local/bin`, `~/.local/share/mise/shims`, `~/.var/app` and the desktop-entry folders; `.config/<name>` and `.local/share/<name>` mentions in Omarchy's own text files under `/usr/share/omarchy` (at most 24 MiB read, cached); modification times inside candidate folders; the `[Desktop Entry]` group of your `.desktop` files in `~/.local/share/applications` and `~/.config/autostart` (64 KiB each) | `pacman -Qq`, `systemctl --user show-environment` (only `PATH` is kept) |
 | Disk usage | free space on `/` | — |
-| Failed services | — | `systemctl list-units --state=failed --output=json` and the same with `--user` (unit name and description only) |
+| Failed services | — | `systemctl list-units --state=failed --output=json` and the same with `--user` (unit name and description only). If either doesn't answer with a list, the check says it couldn't check rather than "all services are running" |
 
 Files in your home are opened without following symlinks, checked to be
 regular files you own, and read only up to a size limit. Directory sizes
@@ -361,13 +364,20 @@ result is never announced as this one's.
   (`zenity --file-selection --directory`, shown through the desktop portal)
   while Keepwell steps aside. Keepwell finds git repositories up to four
   levels down, skipping hidden folders and dependency folders such as
-  `node_modules`, at most 100, within 20 seconds. A symlinked folder is
+  `node_modules`, at most 100, within 20 seconds, reading at most 2,000
+  entries per folder. A folder it can't open, or a search that stops at one
+  of those limits, is recorded with the result: the check, the notification
+  and the deep-scan summary then say the scan was incomplete and what was
+  left out, never "no secrets found". A symlinked folder is
   followed only if the folder it points to is yours (`~/Projects` linking to
   another drive is; a link into `/`, `/usr` or another account's files is
   not), and each real folder is visited once, so a link loop can't trap the
   search or carry it outside your files. It runs
-  `gitleaks git --redact --report-format json --report-path - -- <repo>` on
-  each in the `keepwell-gitleaks` service. Only locations are kept (see
+  `gitleaks git --no-banner --redact --log-level error "--log-opts=--no-textconv --no-ext-diff" --report-format json --report-path - --exit-code 0 --timeout 300 -- <repo>`
+  on each in the `keepwell-gitleaks` service, with git's user and system
+  config turned off (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`,
+  `GIT_ATTR_NOSYSTEM=1`) so a repository's own diff drivers never run. At
+  most 200 findings are kept; when there were more, the count says "at least". Only locations are kept (see
   `gitleaks.json` above).
 - **Dependency vulnerabilities** works the same way (home folder by
   default, or **Choose another folder…**), in the `keepwell-osv` service:
@@ -452,6 +462,15 @@ services (so their cards show progress and **Stop scan** works), waits for
 them, saves a one-line summary and sends **one** notification — for example
 "Virus scan of Downloads: nothing found; no secrets found." It never removes,
 installs or changes anything.
+
+The summary has one part for every scan the run was set to do, read only
+from what that scan wrote after it was started (the same rule as `--since`
+above; with both virus scans chosen, each is matched to its own folder's
+log). A scan that couldn't start, was already running, lost its folder, was
+still running after 12 hours, or stopped before it wrote its log or summary
+is named as such ("virus scan of home folder failed: it stopped before it
+could write its log"), never left out and never reported as clean. If the
+summary can't be saved, the notification is still sent and says so.
 
 **Missed runs.** If the computer is off, suspended or hibernating at the
 scheduled time, the run doesn't happen late: a run that would start more
