@@ -26,8 +26,9 @@
     keepwell-run leaks <folder>               start a gitleaks scan in the background
     keepwell-run osv <folder>                 start an osv-scanner scan in the background
     keepwell-run stop  clamscan|gitleaks|osv  stop that background scan
-    keepwell-run notify clamscan|gitleaks     (run when a scan ends) say what it found,
-                                              and tell Keepwell to check again
+    keepwell-run notify clamscan|gitleaks|osv --since <epoch> [--quiet]
+                                              (run when a scan ends) say what that run
+                                              found, and tell Keepwell to check again
     keepwell-run pick-folder                  ask for a folder (zenity), print it as JSON
     keepwell-run pending set <addr> <check> <action> | get | clear
                                               the terminal Keepwell is waiting on, kept
@@ -1033,11 +1034,15 @@ def _background(unit, kind, argv, quiet=False):
         return {"started": False, "reason": "running"}
     # When the scan ends, this script (from its own absolute path) reads the
     # result, sends one notification that says it, and asks Keepwell to
-    # check again, so the window already shows it.
+    # check again, so the window already shows it. --since binds it to this
+    # run: a result older than the start (a scan that failed before it wrote
+    # one) is never announced as this scan's.
     me = os.path.realpath(__file__)
     if not re.fullmatch(r"/[A-Za-z0-9/._@+-]+", me):
         return {"started": False, "reason": "path"}
-    notify = "ExecStopPost=/usr/bin/python3 -I -S %s notify %s%s" % (me, kind, " --quiet" if quiet else "")
+    since = int(time.time())
+    notify = "ExecStopPost=/usr/bin/python3 -I -S %s notify %s --since %d%s" % (
+        me, kind, since, " --quiet" if quiet else "")
     rc = subprocess.call(["/usr/bin/systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
                           "--property=Nice=19", "--property=IOSchedulingClass=idle",
                           "--property=" + notify, "--"] + argv,
@@ -1134,12 +1139,16 @@ def clam_scan(target):
     skip = [os.path.join(HOME, sub) for sub in CLAM_SKIP] if target == "home" else []
     started = int(time.time())
     _progress("clamscan", started, 0, None)
+    # This run's log comes first, empty, so a failure from here on (the file
+    # list can't be written, clamscan can't start) leaves a log with no
+    # summary, which shows as stopped. If even this fails, there is no log
+    # newer than the run's start and notify says the scan didn't run.
+    log = keepwell_state.new_log(target)
     listfile = keepwell_state.new_filelist(target)
     lfd = os.open(listfile, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(lfd, "wb") as lst:
         total, odd, unreadable = _list_files(path, skip, lst)
     _progress("clamscan", started, 0, total)
-    log = keepwell_state.new_log(target)
     argv = ["/usr/bin/clamscan", "--infected", "--verbose", "--file-list=" + listfile]
     fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(fd, "wb", buffering=0) as out:
@@ -1340,16 +1349,26 @@ def _infected(log):
     return max(n - len(hidden), len(shown))
 
 
-def notify(kind, quiet=False):
+def _this_run(at, since):
+    """True when a result was made by the run that started at `since`."""
+    return isinstance(at, int) and isinstance(since, int) and at >= since
+
+
+def notify(kind, quiet=False, since=None):
+    """since: when the unit was started. Only a result from that run is
+    announced; an older log or summary is never reported as this scan's."""
     keepwell_state.remove("progress-%s.json" % kind)
     if quiet:
         _refresh()
         return 0
     if kind == "clamscan":
         found = keepwell_state.latest_log()
-        log = found[1].decode("utf-8", "replace") if found and found[1] else ""
-        where = "Home folder" if found and found[0].endswith("-home.log") else "Downloads"
-        if "----------- SCAN SUMMARY -----------" not in log:
+        mine = bool(found) and _this_run(int(found[0][:10]), since)
+        log = found[1].decode("utf-8", "replace") if mine and found[1] else ""
+        where = "Home folder" if mine and found[0].endswith("-home.log") else "Downloads"
+        if not mine:
+            title, body = "Virus scan failed", "It stopped before it could write its log. Nothing was checked."
+        elif "----------- SCAN SUMMARY -----------" not in log:
             title, body = "Virus scan stopped", where + ": stopped before the end."
         else:
             tail = keepwell_av.summary(log)
@@ -1370,7 +1389,7 @@ def notify(kind, quiet=False):
                 body += " " + why[0].upper() + why[1:] + "."
     elif kind == "osv":
         doc = keepwell_state.read_json("osv.json") or {}
-        if not doc.get("finished") or not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
+        if not doc.get("finished") or not _this_run(doc.get("at"), since):
             title, body = "Dependency scan stopped", "Stopped before the end."
         else:
             n = doc.get("packages", 0)
@@ -1381,7 +1400,7 @@ def notify(kind, quiet=False):
                 + (" %d couldn't be checked (offline?)." % doc["failed"] if doc.get("failed") else "")
     else:
         doc = keepwell_state.read_json("gitleaks.json") or {}
-        if not doc.get("finished") or not isinstance(doc.get("at"), int) or time.time() - doc["at"] > 86400:
+        if not doc.get("finished") or not _this_run(doc.get("at"), since):
             title, body = "Secrets scan stopped", "Stopped before the end."
         else:
             n, repos, bad = len(doc.get("findings") or []), doc.get("scanned", 0), doc.get("failed", 0)
@@ -1595,7 +1614,7 @@ def _deep_summary(parts, started, skipped):
     said = list(skipped)
     if "scan-downloads" in parts or "scan-home" in parts:
         found = keepwell_state.latest_log()
-        log = found[1].decode("utf-8", "replace") if found and found[1] and int(found[0][:10]) >= started - 5 else ""
+        log = found[1].decode("utf-8", "replace") if found and found[1] and _this_run(int(found[0][:10]), started) else ""
         where = "home folder" if "scan-home" in parts else "Downloads"
         if not log:
             pass
@@ -1610,7 +1629,7 @@ def _deep_summary(parts, started, skipped):
         if name not in parts:
             continue
         doc = keepwell_state.read_json(key) or {}
-        if not isinstance(doc.get("at"), int) or doc["at"] < started - 5 or not doc.get("finished"):
+        if not _this_run(doc.get("at"), started) or not doc.get("finished"):
             if not any(label in s_ for s_ in skipped):
                 said.append("%s scan stopped before the end" % label)
             continue
@@ -2029,8 +2048,9 @@ def main():
     if len(args) == 2 and args[0] == "leaks":
         sys.stdout.write(json.dumps(start_leaks(args[1])))
         return 0
-    if len(args) in (2, 3) and args[0] == "notify" and args[1] in UNITS and args[2:] in ([], ["--quiet"]):
-        return notify(args[1], args[2:] == ["--quiet"])
+    if len(args) in (4, 5) and args[0] == "notify" and args[1] in UNITS and args[2] == "--since" \
+            and re.fullmatch(r"[0-9]{1,12}", args[3]) and args[4:] in ([], ["--quiet"]):
+        return notify(args[1], args[4:] == ["--quiet"], int(args[3]))
     if len(args) == 2 and args[0] == "clam-scan" and args[1] in ("downloads", "home"):
         return clam_scan(args[1])
     if len(args) == 2 and args[0] == "leaks-scan":
