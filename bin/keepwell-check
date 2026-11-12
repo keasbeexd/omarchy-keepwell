@@ -849,59 +849,122 @@ def _sshd_file(path):
     return read_file(path, 64 * 1024, root_owned=True)
 
 
+SSHD_KEYS = ("passwordauthentication", "kbdinteractiveauthentication", "challengeresponseauthentication",
+             "permitrootlogin", "port")
+# sshd's own getopt string: these flags take an argument.
+SSHD_ARG_FLAGS = set("CEbcfghkopu")
+
+
+def _sshd_args(rest):
+    """The arguments on an sshd_config line: words, or "double quoted"."""
+    return [a if a else b for a, b in re.findall(r'"([^"]*)"|(\S+)', rest)]
+
+
+def _sshd_line(line):
+    """(keyword, arguments) of one sshd_config line, the way sshd splits it:
+    "Keyword value" or "Keyword=value", the keyword case-insensitive,
+    arguments unquoted. None for blank lines and comments."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    m = re.match(r"([A-Za-z][A-Za-z0-9]*)(?:\s*=\s*|\s+|$)(.*)$", line)
+    if not m:
+        return None
+    return m.group(1).lower(), _sshd_args(m.group(2))
+
+
+def _sshd_command_line(unsure):
+    """Settings given to sshd on its command line, which it reads before any
+    file. From `systemctl show` for sshd.service and for the socket's
+    per-connection sshd@.service: -o key=value, -p port; -f (another config
+    file) means Keepwell's reading of /etc/ssh/sshd_config doesn't apply."""
+    out = {}
+    for unit in ("sshd.service", "sshd@keepwell-probe.service"):
+        rc, raw = text(["/usr/bin/systemctl", "show", "-p", "ExecStart", "--value", "--", unit], timeout=3, cap=16384)
+        if rc != 0:
+            unsure.append("sshd's command line couldn't be read")
+            continue
+        for argv in re.findall(r"argv\[\]=([^;]*);", raw):
+            tokens = argv.split()[1:]
+            i = 0
+            while i < len(tokens):
+                tok = tokens[i]
+                i += 1
+                if not tok.startswith("-") or tok == "-":
+                    continue          # a later word of a spaced -o value
+                j = 1
+                while j < len(tok):
+                    flag = tok[j]
+                    if flag in SSHD_ARG_FLAGS:
+                        arg = tok[j + 1:]
+                        if not arg and i < len(tokens):
+                            arg = tokens[i]
+                            i += 1
+                        if flag == "f":
+                            unsure.append("sshd is started with another config file (-f)")
+                        elif flag == "o":
+                            kv = _sshd_line(arg)
+                            if kv and kv[0] in ("include", "match"):
+                                unsure.append("sshd is started with -o %s" % kv[0].capitalize())
+                            elif kv and kv[0] in SSHD_KEYS and kv[0] not in out and kv[1]:
+                                out[kv[0]] = kv[1][0].lower()
+                        elif flag == "p" and "port" not in out:
+                            out["port"] = arg
+                        break
+                    j += 1
+    return out
+
+
 def _sshd_settings():
-    """The settings sshd would use: drop-ins included where `Include` names
-    them, the first value for each key winning (sshd's own rule), and
-    conditional `Match` blocks left out."""
+    """The settings sshd would use: its command line first, then
+    sshd_config with drop-ins included where `Include` names them, the
+    first value for each key winning (sshd's own rule). Match blocks are not
+    evaluated, but any that could loosen what is reported is noted."""
     want = {"passwordauthentication": "yes", "kbdinteractiveauthentication": "yes",
             "challengeresponseauthentication": None, "permitrootlogin": "prohibit-password", "port": "22"}
-    found = {}
     # Why the result can't be trusted to be complete: a file sshd reads that
-    # Keepwell can't, an Include it doesn't follow, or a Match block that
-    # turns password or root login back on for some connections. With any of
-    # these, "keys only" is never claimed.
+    # Keepwell can't (it may hold a Match block, which overrides the global
+    # settings however early they were set), an Include it doesn't follow,
+    # options on sshd's command line it can't account for, or a Match block
+    # that turns password or root login back on for some connections. With
+    # any of these, "keys only" is never claimed.
     unsure = []
-
-    def settled():
-        """sshd keeps the first value it reads for each setting, so a file
-        it reads after these are all set can't change what Keepwell reports."""
-        return "passwordauthentication" in found and "permitrootlogin" in found and \
-            ("kbdinteractiveauthentication" in found or "challengeresponseauthentication" in found)
+    found = _sshd_command_line(unsure)
 
     def walk(path, depth):
         if depth > 2:
-            if not settled():
-                unsure.append("an Include nested more than two levels deep")
+            unsure.append("an Include nested more than two levels deep")
             return
         raw = _sshd_file(path)
         if raw is None:
-            if not settled():
-                unsure.append("%s couldn't be read" % clean(path, 80))
+            unsure.append("%s couldn't be read" % clean(path, 80))
             return
         in_match = False
         for line in raw.decode("utf-8", "replace").splitlines():
-            parts = line.split("#", 1)[0].split()
-            if not parts:
+            kv = _sshd_line(line)
+            if kv is None:
                 continue
-            key = parts[0].lower()
+            key, args = kv
+            value = args[0].lower() if args else ""
             if key == "match":
+                # Lasts until the next Match line or the end of this file;
+                # "Match All" is a block too, one that matches everything.
                 in_match = True
                 continue
             if in_match:
-                # Everything after a Match line applies only to the
-                # connections it matches. Keepwell doesn't evaluate them,
-                # but notes any that loosen what it reports.
-                value = parts[1].lower() if len(parts) > 1 else ""
                 if key in ("passwordauthentication", "kbdinteractiveauthentication",
-                           "challengeresponseauthentication") and value == "yes":
+                           "challengeresponseauthentication") and value != "no":
                     unsure.append("a Match block allows passwords for some connections")
                 elif key == "permitrootlogin" and value != "no":
                     unsure.append("a Match block changes root login for some connections")
+                elif key == "authenticationmethods" and any(
+                        "password" in a.lower() or "keyboard-interactive" in a.lower() for a in args):
+                    unsure.append("a Match block changes how some connections log in")
                 elif key == "include":
                     unsure.append("a Match block includes other files")
                 continue
-            if key == "include" and len(parts) > 1:
-                for pattern in parts[1:]:
+            if key == "include":
+                for pattern in args:
                     pattern = pattern if pattern.startswith("/") else "/etc/ssh/" + pattern
                     folder, glob_part = os.path.split(pattern)
                     if not pattern.startswith("/etc/ssh/") or any(c in folder for c in "*?[") \
@@ -921,12 +984,12 @@ def _sshd_settings():
                         unsure.append("more than 100 files in %s" % clean(folder, 80))
                     for name in matched[:100]:
                         walk(os.path.join(folder, name), depth + 1)
-            elif key in want and key not in found and len(parts) > 1:
-                found[key] = parts[1].lower()
+            elif key in want and key not in found and value:
+                found[key] = value
 
     walk("/etc/ssh/sshd_config", 0)
     kbd = found.get("kbdinteractiveauthentication") or found.get("challengeresponseauthentication") or "yes"
-    return {"passwords": found.get("passwordauthentication", "yes") == "yes" or kbd == "yes",
+    return {"passwords": found.get("passwordauthentication", "yes") != "no" or kbd != "no",
             "rootLogin": found.get("permitrootlogin", want["permitrootlogin"]),
             "port": found.get("port", "22") if re.fullmatch(r"\d{1,5}", found.get("port", "22")) else "22",
             "unsure": sorted(set(unsure))[:5]}
