@@ -62,8 +62,11 @@ def settings(files, units=None, service=True, socket=None, unitdirs=None, loaded
     def run_units(unsure):
         if running == "hidden":
             unsure.append("running programs couldn't be listed")
-            return set()
-        return set(running)
+            return {"units": set(), "outside": 0, "unknown": True}
+        if running == "outside":
+            unsure.append("an sshd runs outside a system service")
+            return {"units": set(), "outside": 1, "unknown": False}
+        return {"units": set(running), "outside": 0, "unknown": False}
     g["_sshd_running"] = run_units
 
     def listdir(d):
@@ -235,6 +238,23 @@ if r["elsewhere"] != ["my-sshd.service"] or "2200" not in r["port"]:
     bad.append("elsewhere: %r" % r)
 expect("sshd in sshd.service isn't elsewhere", settings(files, running=["sshd.service"]), False, False)
 expect("processes hidden", settings(files, running="hidden"), False, True)
+if not settings(files, service=False, running="hidden")["runningUnknown"]:
+    bad.append("hidden processes not reported for the off state")
+r = settings(files, service=False, running="outside")
+if r["outside"] != 1 or not r["unsure"]:
+    bad.append("sshd outside a service: %r" % r)
+
+# The reported case: more than five other services, the sixth allowing
+# passwords. Every one is resolved; past 20 the result is unsure.
+many = ["other%d.service" % n for n in range(6)]
+units = dict(cmd("-D", *HARD), **{u: [(SSHD, [SSHD, "-D"] + HARD)] for u in many[:5]})
+units[many[5]] = [(SSHD, [SSHD, "-D", "-o", "PasswordAuthentication yes"])]
+r = settings(OPEN, units, running=many)
+if r["passwords"] is not True or r["elsewhereMore"] != 1:
+    bad.append("sixth other service: %r" % r)
+many = ["other%02d.service" % n for n in range(21)]
+units = dict(cmd("-D", *HARD), **{u: [(SSHD, [SSHD, "-D"] + HARD)] for u in many})
+expect("more than 20 other services", settings(OPEN, units, running=many), False, True)
 expect("unit with no command line", settings(files, {"sshd.service": []}), False, True)
 expect("overrides don't matter without Accept=yes", settings(files, unitdirs=dict(UNITDIRS, **{
        "/etc/systemd/system": [I + ".d"]})), False, False)
