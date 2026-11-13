@@ -1104,10 +1104,58 @@ def _sshd_resolve(lines, pports, unsure):
             "rootLogin": root, "ports": listening}
 
 
+def _sshd_instances(unsure):
+    """The per-connection units sshd.socket (Accept=yes) has loaded now,
+    each resolved on its own. Configuration for any instance not yet
+    started (sshd@<name>.service, or a drop-in for one, or for a name
+    prefix such as sshd@0-.service.d, which systemd applies by truncating
+    the name after each dash) can't be checked against a name that doesn't
+    exist yet, so any such entry in systemd's unit paths makes the result
+    unsure. Only sshd@.service itself and its sshd@.service.d apply to
+    every connection, and those the probe instance shows."""
+    rc, out = text(["/usr/bin/systemd-analyze", "unit-paths"], timeout=3, cap=16384)
+    dirs = [d for d in out.splitlines() if d.startswith("/")] if rc == 0 else []
+    if not dirs:
+        unsure.append("systemd's unit folders couldn't be read")
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            unsure.append("%s couldn't be read" % clean(d, 80))
+            continue
+        if any(n.startswith("sshd@") and n not in ("sshd@.service", "sshd@.service.d") for n in names):
+            unsure.append("systemd has settings for single SSH connections (%s)" % clean(d, 60))
+    data = _unit_list("sshd@*.service")
+    if data is None:
+        unsure.append("sshd's connection units couldn't be listed")
+        return []
+    names = [n for n in data if n != SSHD_TEMPLATE and re.fullmatch(r"sshd@[^/\s]+\.service", n)]
+    if len(names) > 20:
+        unsure.append("more than 20 SSH connections")
+    return names[:20]
+
+
+def _unit_list(pattern):
+    """Names of the system units loaded now that match pattern, or None."""
+    rc, raw = text(["/usr/bin/busctl", "--system", "--json=short", "call", "org.freedesktop.systemd1",
+                    "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "ListUnitsByPatterns",
+                    "asas", "0", "1", pattern], timeout=3, cap=1 << 20)
+    try:
+        data = json.loads(raw) if rc == 0 else None
+        if data.get("type") != "a(ssssssouso)":
+            return None
+        return [str(u[0]) for u in data["data"][0]]
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return None
+
+
 def _sshd_settings(service_used=True, socket_used=False):
     """The settings of every sshd that can be reached: sshd.service when it
     is enabled or running, and when sshd.socket is, the per-connection
-    sshd@.service it starts (on the socket's ports). Each is resolved on its
+    sshd@.service it starts (on the socket's ports), as the template and as
+    each connection unit loaded now. Each is resolved on its
     own, from its own command line, so a hardened unit that isn't in use
     can't stand in for one that is. The most open of them is reported."""
     # Why the result can't be trusted to be complete: a file sshd reads that
@@ -1123,12 +1171,14 @@ def _sshd_settings(service_used=True, socket_used=False):
         sock = _sshd_socket()
         if sock is None:
             unsure.append("sshd.socket's settings couldn't be read")
-            daemons += [(SSHD_TEMPLATE, []), ("sshd.service", None)]
+            daemons += [(u, []) for u in [SSHD_TEMPLATE] + _sshd_instances(unsure)] + [("sshd.service", None)]
         else:
             if sock["other"]:
                 unsure.append("sshd.socket listens in a way Keepwell doesn't read")
             if sock["accept"]:
-                daemons.append((SSHD_TEMPLATE, sock["ports"]))
+                # The template as a new connection gets it, and every
+                # connection unit loaded now, each with its own settings.
+                daemons += [(u, sock["ports"]) for u in [SSHD_TEMPLATE] + _sshd_instances(unsure)]
             elif sock["triggers"] == ["sshd.service"]:
                 daemons.append(("sshd.service", None))
             else:

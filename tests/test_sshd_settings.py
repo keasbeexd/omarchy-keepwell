@@ -21,6 +21,7 @@ check = runpy.run_path(str(root / "bin" / "keepwell-check"), run_name="keepwell_
 g = check["_sshd_settings"].__globals__
 real_listdir = os.listdir
 SSHD = "/usr/bin/sshd"
+T = "sshd@keepwell-probe.service"
 # What systemd 262 returns over D-Bus for Arch's units: exact argument lists.
 STOCK = {"sshd.service": [(SSHD, [SSHD, "-D"])],
          "sshd@keepwell-probe.service": [(SSHD, [SSHD, "-i", "-o", "AuthorizedKeysFile ${CREDENTIALS_DIRECTORY}"
@@ -34,17 +35,35 @@ D = "/etc/ssh/sshd_config.d/"
 SOCKET = {"accept": True, "ports": ["22"], "triggers": [], "other": False}
 
 
-def settings(files, units=None, service=True, socket=None):
+UNITDIRS = {"/etc/systemd/system": ["sshd@.service.d", "multi-user.target.wants"],
+            "/usr/lib/systemd/system": ["sshd.service", "sshd@.service"]}
+
+
+def settings(files, units=None, service=True, socket=None, unitdirs=None, loaded=()):
     """files: {path: bytes, or None for unreadable}; units: ExecStart per
     unit as [(path, argv)], or None when systemd gave no answer; service:
     sshd.service is enabled or running; socket: sshd.socket's settings when
-    it is enabled or running ("none" when systemd gave no answer)."""
+    it is enabled or running ("none" when systemd gave no answer);
+    unitdirs: systemd's unit folders and their entries (a value of None is
+    unreadable); loaded: the sshd@ units loaded now (None: no answer)."""
+    unitdirs = UNITDIRS if unitdirs is None else unitdirs
     names = sorted(os.path.basename(p) for p in files if p.startswith(D))
     units = dict(STOCK, **(units or {}))
     g["_sshd_file"] = lambda path: files.get(path)
     g["_unit_exec_start"] = lambda unit: units.get(unit)
     g["_sshd_socket"] = lambda: None if socket == "none" else socket
-    os.listdir = lambda d: names if d == D.rstrip("/") else real_listdir(d)
+    g["text"] = lambda argv, **kw: (0, "\n".join(unitdirs) + "\n") if argv[-1] == "unit-paths" else (1, "")
+    g["_unit_list"] = lambda pattern: None if loaded is None else [T] + list(loaded)
+
+    def listdir(d):
+        if d == D.rstrip("/"):
+            return names
+        if d in unitdirs:
+            if unitdirs[d] is None:
+                raise PermissionError(13, "Permission denied")
+            return unitdirs[d]
+        return real_listdir(d)
+    os.listdir = listdir
     try:
         return check["_sshd_settings"](service_used=service, socket_used=socket is not None)
     finally:
@@ -124,7 +143,6 @@ for name, args, passwords, unsure in (
         ("-o with a variable as the key", ["-D", "-o", "${KEY} yes"], False, True),
         ("-p with a variable", ["-D", "-p", "$PORT"], False, True)):
     expect(name, settings(files, cmd(*args)), passwords, unsure)
-T = "sshd@keepwell-probe.service"
 expect("-o on the socket's unit", settings(files, cmd("-i", "-o", "PasswordAuthentication yes", unit=T),
                                            service=False, socket=SOCKET), True, False)
 expect("-o Match on the socket's unit", settings(files, cmd("-i", "-o", "Match=all", unit=T),
@@ -161,6 +179,27 @@ expect("socket starts another service", settings(files, service=False,
        socket=dict(SOCKET, accept=False, triggers=["other.service"])), False, True)
 expect("socket listener Keepwell can't read", settings(files, socket=dict(SOCKET, other=True)), False, True)
 expect("socket unreadable", settings(files, socket="none"), False, True)
+
+# The reported case: an override for single connections while the template
+# stays hardened. A connection loaded now is resolved with its own command
+# line; one not started yet can't be, so any override for one is unsure.
+I = "sshd@3-192.0.2.1:22-198.51.100.7:50122.service"
+both = dict(cmd("-i", *HARD, unit=T), **cmd("-i", "-o", "PasswordAuthentication yes", unit=I))
+expect("loaded connection with passwords on", settings(OPEN, both, service=False, socket=SOCKET,
+                                                       loaded=[I]), True, False)
+expect("loaded connection, hardened", settings(OPEN, dict(cmd("-i", *HARD, unit=T), **cmd("-i", *HARD, unit=I)),
+                                               service=False, socket=SOCKET, loaded=[I]), False, False)
+for entry in (I, I + ".d", "sshd@3-.service.d", "sshd@keepwell-.service.d"):
+    expect("override %s" % entry, settings(files, service=False, socket=SOCKET,
+           unitdirs=dict(UNITDIRS, **{"/etc/systemd/system.control": [entry]})), False, True)
+expect("unit folder unreadable", settings(files, service=False, socket=SOCKET,
+       unitdirs=dict(UNITDIRS, **{"/run/systemd/system": None})), False, True)
+expect("unit folders unknown", settings(files, service=False, socket=SOCKET, unitdirs={}), False, True)
+expect("connections not listed", settings(files, service=False, socket=SOCKET, loaded=None), False, True)
+expect("more than 20 connections", settings(files, service=False, socket=SOCKET,
+       loaded=["sshd@%d-x.service" % n for n in range(21)]), False, True)
+expect("overrides don't matter without Accept=yes", settings(files, unitdirs=dict(UNITDIRS, **{
+       "/etc/systemd/system": [I + ".d"]})), False, False)
 
 # Ports add up, as sshd -T shows: every Port, or only -p's; a ListenAddress
 # with a port uses only that port; Port under Match All still applies.
