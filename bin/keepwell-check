@@ -25,6 +25,7 @@ checked on the descriptor before they are read, and reads are capped.
 """
 
 import calendar
+import errno
 import json
 import os
 import re
@@ -1178,18 +1179,21 @@ def _unit_list(patterns):
         return None
 
 
-def _sshd_running(unsure):
+def _sshd_running(unsure, proc="/proc"):
     """Service units with an sshd listener running in them now (a process
     named sshd; each connection's process is sshd-session), from
     /proc/<pid>/comm and cgroup, which anyone can read. So an sshd started
     from a unit with another name is found and resolved too. If /proc hides
-    other users' processes, this can't be known. Returns {"units": set,
+    other users' processes (hidepid=2 or invisible: PID 1 isn't listed),
+    or lets them be listed but not read (hidepid=1 or noaccess, or any other
+    refusal), this can't be known. Only a process that is gone (ENOENT,
+    ESRCH) may be skipped. Returns {"units": set,
     "outside": sshd processes not in a system service, "unknown": whether
     running programs couldn't all be seen}."""
     found = {"units": set(), "outside": 0, "unknown": False}
     units = found["units"]
     try:
-        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
     except OSError:
         pids = []
     if "1" not in pids or len(pids) > 20000:
@@ -1198,13 +1202,18 @@ def _sshd_running(unsure):
         return found
     for pid in pids:
         try:
-            with open("/proc/%s/comm" % pid, "rb") as f:
+            with open("%s/%s/comm" % (proc, pid), "rb") as f:
                 if f.read(64) != b"sshd\n":
                     continue
-            with open("/proc/%s/cgroup" % pid, "rb") as f:
+            with open("%s/%s/cgroup" % (proc, pid), "rb") as f:
                 cg = f.read(4096).decode("utf-8", "replace")
-        except OSError:
-            continue          # gone, or not ours to read
+        except OSError as e:
+            if e.errno in (errno.ENOENT, errno.ESRCH):
+                continue      # the process ended while being read
+            # Listed but not readable: it could be an sshd.
+            unsure.append("running programs couldn't all be read")
+            found["unknown"] = True
+            continue
         m = re.search(r"(?m)^0::(\S*)$", cg)
         path = m.group(1) if m else ""
         unit = path.rsplit("/", 1)[-1]
