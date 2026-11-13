@@ -18,9 +18,11 @@ sys.path.insert(0, str(root / "bin"))
 check = runpy.run_path(str(root / "bin" / "keepwell-check"), run_name="keepwell_check")
 g = check["_sshd_settings"].__globals__
 real_listdir = os.listdir
-STOCK = {"sshd.service": "{ path=/usr/bin/sshd ; argv[]=/usr/bin/sshd -D ; ignore_errors=no ; }",
-         "sshd@keepwell-probe.service": "{ path=/usr/bin/sshd ; argv[]=/usr/bin/sshd -i -o AuthorizedKeysFile "
-                                        "${CREDENTIALS_DIRECTORY}/ssh.ephemeral-authorized_keys-all .ssh/authorized_keys ; }"}
+SSHD = "/usr/bin/sshd"
+# What systemd 262 returns over D-Bus for Arch's units: exact argument lists.
+STOCK = {"sshd.service": [(SSHD, [SSHD, "-D"])],
+         "sshd@keepwell-probe.service": [(SSHD, [SSHD, "-i", "-o", "AuthorizedKeysFile ${CREDENTIALS_DIRECTORY}"
+                                                 "/ssh.ephemeral-authorized_keys-all .ssh/authorized_keys"])]}
 
 MAIN = b"Include /etc/ssh/sshd_config.d/*.conf\nKbdInteractiveAuthentication no\n"
 KEYS = b"PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n"
@@ -28,11 +30,12 @@ D = "/etc/ssh/sshd_config.d/"
 
 
 def settings(files, units=None):
-    """files: {path: bytes, or None for unreadable}; units: ExecStart per unit."""
+    """files: {path: bytes, or None for unreadable}; units: ExecStart per
+    unit as [(path, argv)], or None when systemd gave no answer."""
     names = sorted(os.path.basename(p) for p in files if p.startswith(D))
     units = dict(STOCK, **(units or {}))
     g["_sshd_file"] = lambda path: files.get(path)
-    g["text"] = lambda argv, **kw: (0, units[argv[-1]]) if units.get(argv[-1]) is not None else (1, "")
+    g["_unit_exec_start"] = lambda unit: units.get(unit)
     os.listdir = lambda d: names if d == D.rstrip("/") else real_listdir(d)
     try:
         return check["_sshd_settings"]()
@@ -88,17 +91,39 @@ expect("Include with ?", settings({"/etc/ssh/sshd_config": b"Include /etc/ssh/ss
 # sshd's command line.
 files = {"/etc/ssh/sshd_config": MAIN, D + "10-keepwell-keys-only.conf": KEYS}
 expect("stock units", settings(files), False, False)
-expect("-o PasswordAuthentication=yes", settings(files, {"sshd.service":
-       "{ argv[]=/usr/bin/sshd -D -o PasswordAuthentication=yes ; }"}), True, False)
-expect("-oPasswordAuthentication yes (joined)", settings(files, {"sshd.service":
-       "{ argv[]=/usr/bin/sshd -D -oPasswordAuthentication=yes ; }"}), True, False)
-expect("-f other file", settings(files, {"sshd.service": "{ argv[]=/usr/bin/sshd -D -f /etc/other ; }"}), False, True)
-expect("-Df other file (cluster)", settings(files, {"sshd.service": "{ argv[]=/usr/bin/sshd -Df/etc/other ; }"}),
-       False, True)
-expect("-o Match", settings(files, {"sshd@keepwell-probe.service": "{ argv[]=/usr/bin/sshd -i -o Match=all ; }"}),
-       False, True)
+
+
+def cmd(*args, unit="sshd.service", path=SSHD):
+    return {unit: [(path, [path] + list(args))]}
+
+
+for name, args, passwords, unsure in (
+        ("-o PasswordAuthentication=yes", ["-D", "-o", "PasswordAuthentication=yes"], True, False),
+        ("-oPasswordAuthentication=yes (joined)", ["-D", "-oPasswordAuthentication=yes"], True, False),
+        # The reported case: one argument holding a space, which sshd -T
+        # confirms enables passwords over a file's "no".
+        ("-o \"PasswordAuthentication yes\"", ["-D", "-o", "PasswordAuthentication yes"], True, False),
+        ("-o\"PasswordAuthentication yes\" (joined)", ["-D", "-oPasswordAuthentication yes"], True, False),
+        ("-o \"KbdInteractiveAuthentication yes\"", ["-D", "-o", "KbdInteractiveAuthentication yes"], True, False),
+        ("-o \"PermitRootLogin yes\" keeps passwords off", ["-D", "-o", "PermitRootLogin yes"], False, False),
+        ("-f other file", ["-D", "-f", "/etc/other"], False, True),
+        ("-Df other file (cluster)", ["-Df/etc/other"], False, True),
+        ("-o \"Match all\"", ["-D", "-o", "Match all"], False, True),
+        ("-o Include", ["-D", "-o", "Include /etc/x.conf"], False, True),
+        ("$OPTS", ["-D", "$SSHD_OPTS"], False, True),
+        ("${OPTS}", ["-D", "${SSHD_OPTS}"], False, True),
+        ("-o with a variable in a reported key", ["-D", "-o", "PasswordAuthentication ${PW}"], False, True),
+        ("-o with a variable as the key", ["-D", "-o", "${KEY} yes"], False, True),
+        ("-p with a variable", ["-D", "-p", "$PORT"], False, True)):
+    expect(name, settings(files, cmd(*args)), passwords, unsure)
+expect("-o on the socket's unit", settings(files, cmd("-i", "-o", "PasswordAuthentication yes",
+                                                      unit="sshd@keepwell-probe.service")), True, False)
+expect("-o Match on the socket's unit", settings(files, cmd("-i", "-o", "Match=all",
+                                                            unit="sshd@keepwell-probe.service")), False, True)
+expect("started through a wrapper", settings(files, cmd("-D", path="/usr/local/bin/start-sshd")), False, True)
 expect("command line unreadable", settings(files, {"sshd.service": None}), False, True)
-r = settings(files, {"sshd.service": "{ argv[]=/usr/bin/sshd -D -p 2222 ; }"})
+expect("socket's command line unreadable", settings(files, {"sshd@keepwell-probe.service": None}), False, True)
+r = settings(files, cmd("-D", "-p", "2222"))
 if r["port"] != "2222":
     bad.append("-p port: %r" % r)
 
