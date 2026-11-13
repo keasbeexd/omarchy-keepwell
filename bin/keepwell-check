@@ -944,7 +944,7 @@ def _sshd_command_line(unit, unsure):
     parsed with sshd's getopt flags."""
     lines, pports = [], []
     cmds = _unit_exec_start(unit)
-    if cmds is None:
+    if not cmds:
         unsure.append("sshd's command line couldn't be read")
         return lines, pports
     for path, argv in cmds:
@@ -1104,15 +1104,38 @@ def _sshd_resolve(lines, pports, unsure):
             "rootLogin": root, "ports": listening}
 
 
+def _sshd_namespaces(unsure):
+    """The template names a connection unit of sshd.socket goes by, like
+    "sshd@": sshd@.service and every alias of it (the probe instance's Id
+    and Names, so an sshd@.service that is an alias of another template
+    gives that template's name too). Settings may be written under any of
+    them."""
+    names = [_unit_property(SSHD_TEMPLATE, "Unit", "Id", "s")]
+    more = _unit_property(SSHD_TEMPLATE, "Unit", "Names", "as")
+    if not isinstance(names[0], str) or not isinstance(more, list):
+        unsure.append("the names of sshd's connection units couldn't be read")
+        return ["sshd@"]
+    out = {"sshd@"}
+    for n in names + more:
+        m = re.fullmatch(r"([A-Za-z0-9:_.\\-]+@)[^/\s]*\.service", str(n))
+        if m:
+            out.add(m.group(1))
+        else:
+            unsure.append("an unexpected name for sshd's connection units")
+    return sorted(out)
+
+
 def _sshd_instances(unsure):
     """The per-connection units sshd.socket (Accept=yes) has loaded now,
     each resolved on its own. Configuration for any instance not yet
-    started (sshd@<name>.service, or a drop-in for one, or for a name
-    prefix such as sshd@0-.service.d, which systemd applies by truncating
-    the name after each dash) can't be checked against a name that doesn't
-    exist yet, so any such entry in systemd's unit paths makes the result
-    unsure. Only sshd@.service itself and its sshd@.service.d apply to
-    every connection, and those the probe instance shows."""
+    started (<template>@<name>.service, or a drop-in for one, or for a
+    name prefix such as sshd@0-.service.d, which systemd applies by
+    truncating the name after each dash) can't be checked against a name
+    that doesn't exist yet, so any such entry in systemd's unit paths, under
+    sshd@ or any alias of it, makes the result unsure. Only the template
+    itself and its .d apply to every connection, and those the probe
+    instance shows."""
+    spaces = _sshd_namespaces(unsure)
     rc, out = text(["/usr/bin/systemd-analyze", "unit-paths"], timeout=3, cap=16384)
     dirs = [d for d in out.splitlines() if d.startswith("/")] if rc == 0 else []
     if not dirs:
@@ -1125,23 +1148,27 @@ def _sshd_instances(unsure):
         except OSError:
             unsure.append("%s couldn't be read" % clean(d, 80))
             continue
-        if any(n.startswith("sshd@") and n not in ("sshd@.service", "sshd@.service.d") for n in names):
-            unsure.append("systemd has settings for single SSH connections (%s)" % clean(d, 60))
-    data = _unit_list("sshd@*.service")
+        for sp in spaces:
+            if any(n.startswith(sp) and n not in (sp + ".service", sp + ".service.d") for n in names):
+                unsure.append("systemd has settings for single SSH connections (%s)" % clean(d, 60))
+    data = _unit_list([sp + "*.service" for sp in spaces])
     if data is None:
         unsure.append("sshd's connection units couldn't be listed")
         return []
-    names = [n for n in data if n != SSHD_TEMPLATE and re.fullmatch(r"sshd@[^/\s]+\.service", n)]
+    probes = {sp + "keepwell-probe.service" for sp in spaces}
+    names = sorted({n for n in data if n not in probes and any(n.startswith(sp) for sp in spaces)
+                    and re.fullmatch(r"[^/\s]+@[^/\s]+\.service", n)})
     if len(names) > 20:
         unsure.append("more than 20 SSH connections")
     return names[:20]
 
 
-def _unit_list(pattern):
-    """Names of the system units loaded now that match pattern, or None."""
+def _unit_list(patterns):
+    """Names of the system units loaded now that match any of patterns, or
+    None."""
     rc, raw = text(["/usr/bin/busctl", "--system", "--json=short", "call", "org.freedesktop.systemd1",
                     "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "ListUnitsByPatterns",
-                    "asas", "0", "1", pattern], timeout=3, cap=1 << 20)
+                    "asas", "0", str(len(patterns))] + list(patterns), timeout=3, cap=1 << 20)
     try:
         data = json.loads(raw) if rc == 0 else None
         if data.get("type") != "a(ssssssouso)":
@@ -1151,11 +1178,46 @@ def _unit_list(pattern):
         return None
 
 
+def _sshd_running(unsure):
+    """Service units with an sshd listener running in them now (a process
+    named sshd; each connection's process is sshd-session), from
+    /proc/<pid>/comm and cgroup, which anyone can read. So an sshd started
+    from a unit with another name is found and resolved too. If /proc hides
+    other users' processes, this can't be known."""
+    units = set()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        pids = []
+    if "1" not in pids:
+        unsure.append("running programs couldn't be listed")
+        return units
+    for pid in pids[:5000]:
+        try:
+            with open("/proc/%s/comm" % pid, "rb") as f:
+                if f.read(64) != b"sshd\n":
+                    continue
+            with open("/proc/%s/cgroup" % pid, "rb") as f:
+                cg = f.read(4096).decode("utf-8", "replace")
+        except OSError:
+            continue          # gone, or not ours to read
+        m = re.search(r"(?m)^0::(\S*)$", cg)
+        path = m.group(1) if m else ""
+        unit = path.rsplit("/", 1)[-1]
+        # A user's own services sit under user@<uid>.service.
+        if "/user@" not in path and re.fullmatch(r"[A-Za-z0-9:_.@\\-]{1,200}\.service", unit):
+            units.add(unit)
+        else:
+            unsure.append("an sshd runs outside a system service")
+    return units
+
+
 def _sshd_settings(service_used=True, socket_used=False):
     """The settings of every sshd that can be reached: sshd.service when it
     is enabled or running, and when sshd.socket is, the per-connection
     sshd@.service it starts (on the socket's ports), as the template and as
-    each connection unit loaded now. Each is resolved on its
+    each connection unit loaded now, and any other unit an sshd is running
+    from. Each is resolved on its
     own, from its own command line, so a hardened unit that isn't in use
     can't stand in for one that is. The most open of them is reported."""
     # Why the result can't be trusted to be complete: a file sshd reads that
@@ -1185,6 +1247,9 @@ def _sshd_settings(service_used=True, socket_used=False):
                 unsure.append("sshd.socket starts another service")
     if service_used or not daemons:
         daemons.append(("sshd.service", None))
+    # An sshd running from any other unit counts too, with its own settings.
+    elsewhere = sorted(u for u in _sshd_running(unsure) if u not in dict(daemons) and u != "sshd.service")
+    daemons += [(u, None) for u in elsewhere[:5]]
     passwords, root, ports = False, len(ROOT_LOGIN) - 1, []
     for unit, sock_ports in dict(daemons).items():
         lines, pports = _sshd_command_line(unit, unsure)
@@ -1194,7 +1259,7 @@ def _sshd_settings(service_used=True, socket_used=False):
         ports += r["ports"] if sock_ports is None else sock_ports
     ports = sorted({p for p in ports if re.fullmatch(r"\d{1,5}", p)}, key=int)
     return {"passwords": passwords, "rootLogin": ROOT_LOGIN[root], "port": ", ".join(ports) or "22",
-            "ports": ports, "unsure": sorted(set(unsure))[:5]}
+            "ports": ports, "elsewhere": [clean(u, 80) for u in elsewhere[:5]], "unsure": sorted(set(unsure))[:5]}
 
 
 # systemctl's words for a unit that won't start on its own, and one that
