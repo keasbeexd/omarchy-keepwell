@@ -1183,16 +1183,20 @@ def _sshd_running(unsure):
     named sshd; each connection's process is sshd-session), from
     /proc/<pid>/comm and cgroup, which anyone can read. So an sshd started
     from a unit with another name is found and resolved too. If /proc hides
-    other users' processes, this can't be known."""
-    units = set()
+    other users' processes, this can't be known. Returns {"units": set,
+    "outside": sshd processes not in a system service, "unknown": whether
+    running programs couldn't all be seen}."""
+    found = {"units": set(), "outside": 0, "unknown": False}
+    units = found["units"]
     try:
         pids = [p for p in os.listdir("/proc") if p.isdigit()]
     except OSError:
         pids = []
-    if "1" not in pids:
+    if "1" not in pids or len(pids) > 20000:
         unsure.append("running programs couldn't be listed")
-        return units
-    for pid in pids[:5000]:
+        found["unknown"] = True
+        return found
+    for pid in pids:
         try:
             with open("/proc/%s/comm" % pid, "rb") as f:
                 if f.read(64) != b"sshd\n":
@@ -1209,7 +1213,8 @@ def _sshd_running(unsure):
             units.add(unit)
         else:
             unsure.append("an sshd runs outside a system service")
-    return units
+            found["outside"] += 1
+    return found
 
 
 def _sshd_settings(service_used=True, socket_used=False):
@@ -1248,8 +1253,11 @@ def _sshd_settings(service_used=True, socket_used=False):
     if service_used or not daemons:
         daemons.append(("sshd.service", None))
     # An sshd running from any other unit counts too, with its own settings.
-    elsewhere = sorted(u for u in _sshd_running(unsure) if u not in dict(daemons) and u != "sshd.service")
-    daemons += [(u, None) for u in elsewhere[:5]]
+    running = _sshd_running(unsure)
+    elsewhere = sorted(u for u in running["units"] if u not in dict(daemons) and u != "sshd.service")
+    if len(elsewhere) > 20:
+        unsure.append("sshd runs from more than 20 other services")
+    daemons += [(u, None) for u in elsewhere[:20]]
     passwords, root, ports = False, len(ROOT_LOGIN) - 1, []
     for unit, sock_ports in dict(daemons).items():
         lines, pports = _sshd_command_line(unit, unsure)
@@ -1259,7 +1267,8 @@ def _sshd_settings(service_used=True, socket_used=False):
         ports += r["ports"] if sock_ports is None else sock_ports
     ports = sorted({p for p in ports if re.fullmatch(r"\d{1,5}", p)}, key=int)
     return {"passwords": passwords, "rootLogin": ROOT_LOGIN[root], "port": ", ".join(ports) or "22",
-            "ports": ports, "elsewhere": [clean(u, 80) for u in elsewhere[:5]], "unsure": sorted(set(unsure))[:5]}
+            "ports": ports, "elsewhere": [clean(u, 80) for u in elsewhere[:5]], "elsewhereMore": max(0, len(elsewhere) - 5),
+            "outside": running["outside"], "runningUnknown": running["unknown"], "unsure": sorted(set(unsure))[:5]}
 
 
 # systemctl's words for a unit that won't start on its own, and one that

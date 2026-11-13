@@ -361,9 +361,12 @@ function outside(p, perms, now) {
 function remote(p) {
   var b = CATALOG.remote
   if (!p.installed) return check(b, { kind: "good", status: "No remote login running", meta: "SSH server not installed" })
-  // An sshd running from a unit with another name counts as on, too.
+  // An sshd running from a unit with another name, or outside any system
+  // service, counts as on, too.
   var elsewhere = Array.isArray(p.elsewhere) ? p.elsewhere : []
-  var on = p.active === "active" || p.enabled === "enabled" || p.socket === true || elsewhere.length > 0
+  var more = typeof p.elsewhereMore === "number" && p.elsewhereMore > 0 ? p.elsewhereMore : 0
+  var outside = typeof p.outside === "number" && p.outside > 0 ? p.outside : 0
+  var on = p.active === "active" || p.enabled === "enabled" || p.socket === true || elsewhere.length > 0 || outside > 0
   var keysOnly = p.passwords === false
   var root = p.rootLogin === "yes" ? "Allowed, with a password" : p.rootLogin === "no" ? "Not allowed"
     : p.rootLogin === "forced-commands-only" ? "Only for set commands" : "Keys only"
@@ -375,8 +378,16 @@ function remote(p) {
     fact("Firewall", p.firewallAllows ? "Lets SSH in" : "Doesn't list SSH", "UFW"),
     fact("Your keys", p.authorizedKeys ? plural(p.authorizedKeys, "key can log in as you", "keys can log in as you") : "None in ~/.ssh/authorized_keys")
   ]
-  if (elsewhere.length) facts.push(fact("Also running", "sshd from " + elsewhere.join(" · ")))
+  var also = elsewhere.slice()
+  if (more) also.push(plural(more, "more service", "more services"))
+  if (outside) also.push(plural(outside, "sshd outside any service", "sshds outside any service"))
+  if (also.length) facts.push(fact("Also running", also.join(" · ")))
   var off = { label: "Turn off SSH…", elevated: true, act: "ssh-off" }
+  // "Off" needs every running program seen: an sshd Keepwell can't see
+  // could be listening.
+  if (!on && p.runningUnknown === true) return check(b, { kind: "attn",
+    status: "SSH looks off; Keepwell couldn't see every running program", meta: "SSH units are turned off",
+    facts: facts.slice(2), note: "This system hides other users' processes, so an sshd started some other way wouldn't show." })
   if (!on) return check(b, { kind: "good", status: "No remote login running", meta: "SSH installed, turned off",
     facts: facts.slice(2), note: "If you turn SSH on, use keys rather than passwords." })
   var actions = keysOnly
