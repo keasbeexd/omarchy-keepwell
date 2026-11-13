@@ -850,9 +850,12 @@ def _sshd_file(path):
 
 
 SSHD_KEYS = ("passwordauthentication", "kbdinteractiveauthentication", "challengeresponseauthentication",
-             "permitrootlogin", "port")
+             "permitrootlogin", "port", "listenaddress")
 # sshd's own getopt string: these flags take an argument.
 SSHD_ARG_FLAGS = set("CEbcfghkopu")
+# PermitRootLogin values, most open first.
+ROOT_LOGIN = ("yes", "prohibit-password", "without-password", "forced-commands-only", "no")
+SSHD_TEMPLATE = "sshd@keepwell-probe.service"   # the socket's per-connection unit
 
 
 def _sshd_args(rest):
@@ -873,11 +876,11 @@ def _sshd_line(line):
     return m.group(1).lower(), _sshd_args(m.group(2))
 
 
-def _unit_exec_start(unit):
-    """The ExecStart command lines of a system unit as exact argument lists,
-    [(path, [argv...]), ...], or None when systemd gave no answer. Read over
-    D-Bus because `systemctl show` joins the arguments with spaces, which
-    loses the boundaries of an argument such as -o "PasswordAuthentication yes"."""
+def _unit_property(unit, interface, prop, signature):
+    """A system unit's D-Bus property, or None when systemd gave no answer
+    or one of another type. Read over D-Bus because `systemctl show` joins
+    lists with spaces, which loses the boundaries of an argument such as
+    -o "PasswordAuthentication yes"."""
     rc, raw = text(["/usr/bin/busctl", "--system", "--json=short", "call", "org.freedesktop.systemd1",
                     "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "LoadUnit", "s", unit],
                    timeout=3, cap=4096)
@@ -888,97 +891,118 @@ def _unit_exec_start(unit):
     if not isinstance(path, str) or not path.startswith("/org/freedesktop/systemd1/unit/"):
         return None
     rc, raw = text(["/usr/bin/busctl", "--system", "--json=short", "get-property", "org.freedesktop.systemd1",
-                    path, "org.freedesktop.systemd1.Service", "ExecStart"], timeout=3, cap=65536)
+                    path, "org.freedesktop.systemd1." + interface, prop], timeout=3, cap=65536)
     try:
         data = json.loads(raw) if rc == 0 else None
-        if data.get("type") != "a(sasbttttuii)":
-            return None
-        cmds = [(c[0], c[1]) for c in data["data"]]
-    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return data["data"] if data.get("type") == signature else None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _unit_exec_start(unit):
+    """The ExecStart command lines of a system unit as exact argument lists,
+    [(path, [argv...]), ...], or None when systemd gave no answer."""
+    data = _unit_property(unit, "Service", "ExecStart", "a(sasbttttuii)")
+    try:
+        cmds = [(c[0], c[1]) for c in data]
+    except (IndexError, TypeError):
         return None
     if not all(isinstance(p, str) and isinstance(a, list) and all(isinstance(x, str) for x in a) for p, a in cmds):
         return None
     return cmds
 
 
-def _sshd_command_line(unsure):
-    """Settings given to sshd on its command line, which it reads before any
-    file. For sshd.service and the socket's per-connection sshd@.service:
-    -o key=value, -p port; -f (another config file) means Keepwell's reading
-    of /etc/ssh/sshd_config doesn't apply. Arguments are read one by one,
-    exactly as systemd passes them, and parsed with sshd's getopt flags."""
-    out = {}
-    for unit in ("sshd.service", "sshd@keepwell-probe.service"):
-        cmds = _unit_exec_start(unit)
-        if cmds is None:
-            unsure.append("sshd's command line couldn't be read")
+def _sshd_socket():
+    """sshd.socket as {"accept": bool, "ports": [...], "triggers": [...],
+    "other": bool}, or None when systemd gave no answer. ports are its
+    network stream ports; local (unix, vsock) listeners are left out, and
+    "other" is set for any listener Keepwell can't read."""
+    accept = _unit_property("sshd.socket", "Socket", "Accept", "b")
+    listen = _unit_property("sshd.socket", "Socket", "Listen", "a(ss)")
+    triggers = _unit_property("sshd.socket", "Unit", "Triggers", "as")
+    if not isinstance(accept, bool) or not isinstance(listen, list) or not isinstance(triggers, list):
+        return None
+    ports, other = [], False
+    for item in listen:
+        kind, addr = (item + ["", ""])[:2] if isinstance(item, list) else ("", "")
+        addr = str(addr)
+        if kind == "Stream" and (addr.startswith("/") or addr.startswith("@") or addr.startswith("vsock:")):
             continue
-        for path, argv in cmds:
-            if path not in ("/usr/bin/sshd", "/usr/sbin/sshd"):
-                # A wrapper could start sshd with anything.
-                unsure.append("sshd is started through another program")
+        m = re.fullmatch(r"(?:.*:)?(\d{1,5})", addr)
+        if kind == "Stream" and m:
+            ports.append(m.group(1))
+        else:
+            other = True
+    return {"accept": accept, "ports": ports, "triggers": [str(t) for t in triggers], "other": other}
+
+
+def _sshd_command_line(unit, unsure):
+    """sshd's command line for one unit, which it reads before any file:
+    ([(keyword, arguments)] from -o, [ports from -p]). -f (another config
+    file) means Keepwell's reading of /etc/ssh/sshd_config doesn't apply.
+    Arguments are read one by one, exactly as systemd passes them, and
+    parsed with sshd's getopt flags."""
+    lines, pports = [], []
+    cmds = _unit_exec_start(unit)
+    if cmds is None:
+        unsure.append("sshd's command line couldn't be read")
+        return lines, pports
+    for path, argv in cmds:
+        if path not in ("/usr/bin/sshd", "/usr/sbin/sshd"):
+            # A wrapper could start sshd with anything.
+            unsure.append("sshd is started through another program")
+            continue
+        args = argv[1:]
+        i = 0
+        while i < len(args):
+            tok = args[i]
+            i += 1
+            if "$" in tok and not tok.startswith("-o"):
+                # systemd substitutes environment variables, and $VAR
+                # splits into several arguments: unknown options. (An
+                # -o value is checked below.)
+                unsure.append("sshd's command line uses environment variables")
                 continue
-            args = argv[1:]
-            i = 0
-            while i < len(args):
-                tok = args[i]
-                i += 1
-                if "$" in tok and not tok.startswith("-o"):
-                    # systemd substitutes environment variables, and $VAR
-                    # splits into several arguments: unknown options. (An
-                    # -o value is checked below.)
-                    unsure.append("sshd's command line uses environment variables")
-                    continue
-                if not tok.startswith("-") or tok == "-":
-                    continue
-                j = 1
-                while j < len(tok):
-                    flag = tok[j]
-                    if flag in SSHD_ARG_FLAGS:
-                        arg = tok[j + 1:]
-                        if not arg and i < len(args):
-                            arg = args[i]
-                            i += 1
-                        if flag == "f":
-                            unsure.append("sshd is started with another config file (-f)")
-                        elif flag == "o":
-                            kv = _sshd_line(arg)
-                            m = re.match(r"\s*[A-Za-z][A-Za-z0-9]*(?:\s*=\s*|\s+)", arg)
-                            if "$" in arg and not (m and "$" not in m.group(0) and kv
-                                                   and kv[0] not in SSHD_KEYS + ("include", "match")):
-                                # A variable is fine only in the value of a
-                                # setting Keepwell doesn't report (the stock
-                                # AuthorizedKeysFile ${CREDENTIALS_DIRECTORY}/...).
-                                unsure.append("sshd's command line uses environment variables")
-                            elif kv and kv[0] in ("include", "match"):
-                                unsure.append("sshd is started with -o %s" % kv[0].capitalize())
-                            elif kv and kv[0] in SSHD_KEYS and kv[0] not in out and kv[1]:
-                                out[kv[0]] = kv[1][0].lower()
-                        elif flag == "p":
-                            if "$" in arg:
-                                unsure.append("sshd's command line uses environment variables")
-                            elif "port" not in out:
-                                out["port"] = arg
-                        break
-                    j += 1
-    return out
+            if not tok.startswith("-") or tok == "-":
+                continue
+            j = 1
+            while j < len(tok):
+                flag = tok[j]
+                if flag in SSHD_ARG_FLAGS:
+                    arg = tok[j + 1:]
+                    if not arg and i < len(args):
+                        arg = args[i]
+                        i += 1
+                    if flag == "f":
+                        unsure.append("sshd is started with another config file (-f)")
+                    elif flag == "o":
+                        kv = _sshd_line(arg)
+                        m = re.match(r"\s*[A-Za-z][A-Za-z0-9]*(?:\s*=\s*|\s+)", arg)
+                        if "$" in arg and not (m and "$" not in m.group(0) and kv
+                                               and kv[0] not in SSHD_KEYS + ("include", "match")):
+                            # A variable is fine only in the value of a
+                            # setting Keepwell doesn't report (the stock
+                            # AuthorizedKeysFile ${CREDENTIALS_DIRECTORY}/...).
+                            unsure.append("sshd's command line uses environment variables")
+                        elif kv and kv[0] in ("include", "match"):
+                            unsure.append("sshd is started with -o %s" % kv[0].capitalize())
+                        elif kv and kv[0] in SSHD_KEYS:
+                            lines.append(kv)
+                    elif flag == "p":
+                        if "$" in arg:
+                            unsure.append("sshd's command line uses environment variables")
+                        else:
+                            pports.append(arg)
+                    break
+                j += 1
+    return lines, pports
 
 
-def _sshd_settings():
-    """The settings sshd would use: its command line first, then
-    sshd_config with drop-ins included where `Include` names them, the
-    first value for each key winning (sshd's own rule). Match blocks are not
+def _sshd_files(unsure):
+    """The global lines of sshd_config and the drop-ins it includes, in the
+    order sshd reads them: [(keyword, arguments)]. Match blocks are not
     evaluated, but any that could loosen what is reported is noted."""
-    want = {"passwordauthentication": "yes", "kbdinteractiveauthentication": "yes",
-            "challengeresponseauthentication": None, "permitrootlogin": "prohibit-password", "port": "22"}
-    # Why the result can't be trusted to be complete: a file sshd reads that
-    # Keepwell can't (it may hold a Match block, which overrides the global
-    # settings however early they were set), an Include it doesn't follow,
-    # options on sshd's command line it can't account for, or a Match block
-    # that turns password or root login back on for some connections. With
-    # any of these, "keys only" is never claimed.
-    unsure = []
-    found = _sshd_command_line(unsure)
+    lines = []
 
     def walk(path, depth):
         if depth > 2:
@@ -988,7 +1012,7 @@ def _sshd_settings():
         if raw is None:
             unsure.append("%s couldn't be read" % clean(path, 80))
             return
-        in_match = False
+        in_match = match_all = False
         for line in raw.decode("utf-8", "replace").splitlines():
             kv = _sshd_line(line)
             if kv is None:
@@ -999,6 +1023,7 @@ def _sshd_settings():
                 # Lasts until the next Match line or the end of this file;
                 # "Match All" is a block too, one that matches everything.
                 in_match = True
+                match_all = [a.lower() for a in args] == ["all"]
                 continue
             if in_match:
                 if key in ("passwordauthentication", "kbdinteractiveauthentication",
@@ -1011,6 +1036,10 @@ def _sshd_settings():
                     unsure.append("a Match block changes how some connections log in")
                 elif key == "include":
                     unsure.append("a Match block includes other files")
+                elif key in ("port", "listenaddress") and match_all:
+                    # sshd -T: under "Match All" these still apply globally
+                    # (in any other Match block sshd refuses them).
+                    lines.append(kv)
                 continue
             if key == "include":
                 for pattern in args:
@@ -1033,15 +1062,96 @@ def _sshd_settings():
                         unsure.append("more than 100 files in %s" % clean(folder, 80))
                     for name in matched[:100]:
                         walk(os.path.join(folder, name), depth + 1)
-            elif key in want and key not in found and value:
-                found[key] = value
+            elif key in SSHD_KEYS:
+                lines.append(kv)
 
     walk("/etc/ssh/sshd_config", 0)
+    return lines
+
+
+def _listen_port(addr):
+    """The port written in a ListenAddress, or None when it has none."""
+    m = re.fullmatch(r"\[[^\]]*\]:(\d+)", addr) or re.fullmatch(r"[^:\[\]]*:(\d+)", addr)
+    return m.group(1) if m else None
+
+
+def _sshd_resolve(lines, pports, unsure):
+    """What one sshd would use, from its command line's lines followed by
+    the files': the first value wins for each setting, as in sshd. Ports
+    add up instead: every Port (or only -p's, when given), placed on each
+    ListenAddress that names none (sshd -T confirms all of this)."""
+    found, ports, listen = {}, [], []
+    for key, args in lines:
+        if not args:
+            continue
+        if key == "port":
+            ports.append(args[0])
+        elif key == "listenaddress":
+            listen.append(args[0])
+        elif key not in found:
+            found[key] = args[0].lower()
+    ports = pports or ports or ["22"]
+    listening = []
+    for addr in listen or [None]:
+        port = _listen_port(addr) if addr else None
+        listening += [port] if port else ports
     kbd = found.get("kbdinteractiveauthentication") or found.get("challengeresponseauthentication") or "yes"
+    root = found.get("permitrootlogin", "prohibit-password")
+    if root not in ROOT_LOGIN:
+        unsure.append("an unknown PermitRootLogin value")
+        root = "yes"
     return {"passwords": found.get("passwordauthentication", "yes") != "no" or kbd != "no",
-            "rootLogin": found.get("permitrootlogin", want["permitrootlogin"]),
-            "port": found.get("port", "22") if re.fullmatch(r"\d{1,5}", found.get("port", "22")) else "22",
-            "unsure": sorted(set(unsure))[:5]}
+            "rootLogin": root, "ports": listening}
+
+
+def _sshd_settings(service_used=True, socket_used=False):
+    """The settings of every sshd that can be reached: sshd.service when it
+    is enabled or running, and when sshd.socket is, the per-connection
+    sshd@.service it starts (on the socket's ports). Each is resolved on its
+    own, from its own command line, so a hardened unit that isn't in use
+    can't stand in for one that is. The most open of them is reported."""
+    # Why the result can't be trusted to be complete: a file sshd reads that
+    # Keepwell can't (it may hold a Match block, which overrides the global
+    # settings however early they were set), an Include it doesn't follow,
+    # options on sshd's command line it can't account for, or a Match block
+    # that turns password or root login back on for some connections. With
+    # any of these, "keys only" is never claimed.
+    unsure = []
+    files = _sshd_files(unsure)
+    daemons = []          # (unit, socket ports or None for sshd's own)
+    if socket_used:
+        sock = _sshd_socket()
+        if sock is None:
+            unsure.append("sshd.socket's settings couldn't be read")
+            daemons += [(SSHD_TEMPLATE, []), ("sshd.service", None)]
+        else:
+            if sock["other"]:
+                unsure.append("sshd.socket listens in a way Keepwell doesn't read")
+            if sock["accept"]:
+                daemons.append((SSHD_TEMPLATE, sock["ports"]))
+            elif sock["triggers"] == ["sshd.service"]:
+                daemons.append(("sshd.service", None))
+            else:
+                unsure.append("sshd.socket starts another service")
+    if service_used or not daemons:
+        daemons.append(("sshd.service", None))
+    passwords, root, ports = False, len(ROOT_LOGIN) - 1, []
+    for unit, sock_ports in dict(daemons).items():
+        lines, pports = _sshd_command_line(unit, unsure)
+        r = _sshd_resolve(lines + files, pports, unsure)
+        passwords = passwords or r["passwords"]
+        root = min(root, ROOT_LOGIN.index(r["rootLogin"]))
+        ports += r["ports"] if sock_ports is None else sock_ports
+    ports = sorted({p for p in ports if re.fullmatch(r"\d{1,5}", p)}, key=int)
+    return {"passwords": passwords, "rootLogin": ROOT_LOGIN[root], "port": ", ".join(ports) or "22",
+            "ports": ports, "unsure": sorted(set(unsure))[:5]}
+
+
+# systemctl's words for a unit that won't start on its own, and one that
+# isn't running. Anything else (including a state Keepwell doesn't know)
+# counts as in use, so its settings are read.
+DISABLED = ("disabled", "masked", "masked-runtime", "not-found", "bad")
+STOPPED = ("inactive", "failed")
 
 
 def probe_remote():
@@ -1055,9 +1165,11 @@ def probe_remote():
         # must not read as "no remote login running".
         return {"error": True}
     p["socket"] = sock_enabled == "enabled" or sock_active == "active"
-    p.update(_sshd_settings())
+    p.update(_sshd_settings(service_used=p["enabled"] not in DISABLED or p["active"] not in STOPPED,
+                            socket_used=sock_enabled not in DISABLED or sock_active not in STOPPED))
     rules = b"".join(read_file(f, 1 << 20) or b"" for f in ("/etc/ufw/user.rules", "/etc/ufw/user6.rules"))
-    p["firewallAllows"] = bool(re.search(rb"(?m)^### tuple ### allow (?:tcp|any) " + p["port"].encode() + rb" ", rules))
+    p["firewallAllows"] = any(re.search(rb"(?m)^### tuple ### allow (?:tcp|any) " + port.encode() + rb" ", rules)
+                              for port in p.pop("ports"))
     keys = read_file(os.path.join(HOME, ".ssh", "authorized_keys"), 256 * 1024, user_owned=True)
     p["authorizedKeys"] = len([l for l in (keys or b"").splitlines() if l.strip() and not l.startswith(b"#")])
     p["keepwellKeysOnly"] = os.path.isfile("/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf")

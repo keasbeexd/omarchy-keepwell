@@ -4,6 +4,8 @@ makes the result unsure, however early the global settings were decided,
 because a Match block in it would override them. So does an Include it
 doesn't follow, -f or a Match/Include given with -o, and a Match block
 (Match All included) that turns passwords or root login back on.
+Each sshd that can be reached (sshd.service, and the socket's sshd@.service)
+is resolved on its own, so a hardened unit not in use can't mask one that is.
 
 Run: python3 tests/test_sshd_settings.py
 """
@@ -29,16 +31,22 @@ KEYS = b"PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootL
 D = "/etc/ssh/sshd_config.d/"
 
 
-def settings(files, units=None):
+SOCKET = {"accept": True, "ports": ["22"], "triggers": [], "other": False}
+
+
+def settings(files, units=None, service=True, socket=None):
     """files: {path: bytes, or None for unreadable}; units: ExecStart per
-    unit as [(path, argv)], or None when systemd gave no answer."""
+    unit as [(path, argv)], or None when systemd gave no answer; service:
+    sshd.service is enabled or running; socket: sshd.socket's settings when
+    it is enabled or running ("none" when systemd gave no answer)."""
     names = sorted(os.path.basename(p) for p in files if p.startswith(D))
     units = dict(STOCK, **(units or {}))
     g["_sshd_file"] = lambda path: files.get(path)
     g["_unit_exec_start"] = lambda unit: units.get(unit)
+    g["_sshd_socket"] = lambda: None if socket == "none" else socket
     os.listdir = lambda d: names if d == D.rstrip("/") else real_listdir(d)
     try:
-        return check["_sshd_settings"]()
+        return check["_sshd_settings"](service_used=service, socket_used=socket is not None)
     finally:
         os.listdir = real_listdir
 
@@ -116,16 +124,59 @@ for name, args, passwords, unsure in (
         ("-o with a variable as the key", ["-D", "-o", "${KEY} yes"], False, True),
         ("-p with a variable", ["-D", "-p", "$PORT"], False, True)):
     expect(name, settings(files, cmd(*args)), passwords, unsure)
-expect("-o on the socket's unit", settings(files, cmd("-i", "-o", "PasswordAuthentication yes",
-                                                      unit="sshd@keepwell-probe.service")), True, False)
-expect("-o Match on the socket's unit", settings(files, cmd("-i", "-o", "Match=all",
-                                                            unit="sshd@keepwell-probe.service")), False, True)
+T = "sshd@keepwell-probe.service"
+expect("-o on the socket's unit", settings(files, cmd("-i", "-o", "PasswordAuthentication yes", unit=T),
+                                           service=False, socket=SOCKET), True, False)
+expect("-o Match on the socket's unit", settings(files, cmd("-i", "-o", "Match=all", unit=T),
+                                                 service=False, socket=SOCKET), False, True)
 expect("started through a wrapper", settings(files, cmd("-D", path="/usr/local/bin/start-sshd")), False, True)
 expect("command line unreadable", settings(files, {"sshd.service": None}), False, True)
-expect("socket's command line unreadable", settings(files, {"sshd@keepwell-probe.service": None}), False, True)
-r = settings(files, cmd("-D", "-p", "2222"))
-if r["port"] != "2222":
-    bad.append("-p port: %r" % r)
+expect("socket's command line unreadable", settings(files, {T: None}, socket=SOCKET), False, True)
+
+# Each sshd that can be reached is resolved on its own: the reported case is
+# a hardened unit that isn't in use masking the one that is.
+OPEN = {"/etc/ssh/sshd_config": b"PasswordAuthentication yes\n"}
+HARD = ["-o", "PasswordAuthentication no", "-o", "KbdInteractiveAuthentication no"]
+expect("hardened socket unit not in use, sshd.service open", settings(OPEN, cmd("-i", *HARD, unit=T)), True, False)
+expect("hardened sshd.service not in use, socket open",
+       settings(OPEN, cmd("-D", *HARD), service=False, socket=SOCKET), True, False)
+expect("hardened sshd.service in use, socket open too",
+       settings(OPEN, cmd("-D", *HARD), service=True, socket=SOCKET), True, False)
+expect("both hardened", settings(OPEN, dict(cmd("-D", *HARD), **cmd("-i", *HARD, unit=T)),
+                                 socket=SOCKET), False, False)
+expect("nothing in use reads sshd.service", settings(OPEN, cmd("-i", *HARD, unit=T), service=False), True, False)
+r = settings(files, dict(cmd("-D", "-o", "PermitRootLogin no"), **cmd("-i", "-o", "PermitRootLogin yes", unit=T)),
+             socket=SOCKET)
+if r["rootLogin"] != "yes":
+    bad.append("the most open root login wins: %r" % r)
+
+# sshd.socket: Accept=yes starts sshd@.service on the socket's ports;
+# Accept=no starts sshd.service; anything else is unsure.
+r = settings(files, service=False, socket=dict(SOCKET, ports=["2222"]))
+if r["port"] != "2222" or r["unsure"]:
+    bad.append("socket port: %r" % r)
+expect("Accept=no starts sshd.service", settings(OPEN, cmd("-i", *HARD, unit=T), service=False,
+       socket=dict(SOCKET, accept=False, triggers=["sshd.service"])), True, False)
+expect("socket starts another service", settings(files, service=False,
+       socket=dict(SOCKET, accept=False, triggers=["other.service"])), False, True)
+expect("socket listener Keepwell can't read", settings(files, socket=dict(SOCKET, other=True)), False, True)
+expect("socket unreadable", settings(files, socket="none"), False, True)
+
+# Ports add up, as sshd -T shows: every Port, or only -p's; a ListenAddress
+# with a port uses only that port; Port under Match All still applies.
+for name, conf, args, want in (
+        ("-p", b"", ["-D", "-p", "2222"], "2222"),
+        ("two Ports", b"Port 22\nPort 2222\n", ["-D"], "22, 2222"),
+        ("-p over Port", b"Port 2222\n", ["-D", "-p", "3333"], "3333"),
+        ("-o Port adds", b"Port 2222\n", ["-D", "-o", "Port=5555"], "2222, 5555"),
+        ("ListenAddress with a port", b"Port 8888\nListenAddress 0.0.0.0:7777\n", ["-D"], "7777"),
+        ("ListenAddress with and without", b"Port 2222\nListenAddress 0.0.0.0:4444\nListenAddress [::]\n",
+         ["-D"], "2222, 4444"),
+        ("bare IPv6 ListenAddress", b"ListenAddress ::\nPort 2222\n", ["-D"], "2222"),
+        ("Port under Match All", b"Match All\nPort 1234\n", ["-D"], "1234")):
+    r = settings({"/etc/ssh/sshd_config": conf + KEYS}, cmd(*args))
+    if r["port"] != want:
+        bad.append("%s: %r" % (name, r))
 
 if bad:
     print("\n".join(bad))
