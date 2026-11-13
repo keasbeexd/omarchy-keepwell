@@ -39,13 +39,16 @@ UNITDIRS = {"/etc/systemd/system": ["sshd@.service.d", "multi-user.target.wants"
             "/usr/lib/systemd/system": ["sshd.service", "sshd@.service"]}
 
 
-def settings(files, units=None, service=True, socket=None, unitdirs=None, loaded=()):
+def settings(files, units=None, service=True, socket=None, unitdirs=None, loaded=(), names=(), running=()):
     """files: {path: bytes, or None for unreadable}; units: ExecStart per
     unit as [(path, argv)], or None when systemd gave no answer; service:
     sshd.service is enabled or running; socket: sshd.socket's settings when
     it is enabled or running ("none" when systemd gave no answer);
     unitdirs: systemd's unit folders and their entries (a value of None is
-    unreadable); loaded: the sshd@ units loaded now (None: no answer)."""
+    unreadable); loaded: the sshd@ units loaded now (None: no answer);
+    names: the probe instance's Names (None: no answer); running: units an
+    sshd process runs in ("hidden": /proc doesn't show them)."""
+    props = {} if names is None else {"Id": T, "Names": [T] + list(names)}
     unitdirs = UNITDIRS if unitdirs is None else unitdirs
     names = sorted(os.path.basename(p) for p in files if p.startswith(D))
     units = dict(STOCK, **(units or {}))
@@ -53,7 +56,15 @@ def settings(files, units=None, service=True, socket=None, unitdirs=None, loaded
     g["_unit_exec_start"] = lambda unit: units.get(unit)
     g["_sshd_socket"] = lambda: None if socket == "none" else socket
     g["text"] = lambda argv, **kw: (0, "\n".join(unitdirs) + "\n") if argv[-1] == "unit-paths" else (1, "")
-    g["_unit_list"] = lambda pattern: None if loaded is None else [T] + list(loaded)
+    g["_unit_list"] = lambda patterns: None if loaded is None else [T] + list(loaded)
+    g["_unit_property"] = lambda unit, iface, prop, sig: props.get(prop) if unit == T else None
+
+    def run_units(unsure):
+        if running == "hidden":
+            unsure.append("running programs couldn't be listed")
+            return set()
+        return set(running)
+    g["_sshd_running"] = run_units
 
     def listdir(d):
         if d == D.rstrip("/"):
@@ -198,6 +209,33 @@ expect("unit folders unknown", settings(files, service=False, socket=SOCKET, uni
 expect("connections not listed", settings(files, service=False, socket=SOCKET, loaded=None), False, True)
 expect("more than 20 connections", settings(files, service=False, socket=SOCKET,
        loaded=["sshd@%d-x.service" % n for n in range(21)]), False, True)
+# sshd@.service as an alias of another template: settings for single
+# connections may be written under that template's name.
+for entry in ("ssh-conn@3-192.0.2.1:22-198.51.100.7:50122.service.d", "ssh-conn@3-.service.d"):
+    expect("override %s under an alias" % entry, settings(files, service=False, socket=SOCKET,
+           names=["ssh-conn@keepwell-probe.service"],
+           unitdirs=dict(UNITDIRS, **{"/etc/systemd/system": ["ssh-conn@.service", "ssh-conn@.service.d", entry]})),
+           False, True)
+expect("alias template itself is fine", settings(files, service=False, socket=SOCKET,
+       names=["ssh-conn@keepwell-probe.service"],
+       unitdirs=dict(UNITDIRS, **{"/etc/systemd/system": ["ssh-conn@.service", "ssh-conn@.service.d"]})), False, False)
+J = "ssh-conn@4-192.0.2.1:22-198.51.100.7:50124.service"
+expect("loaded connection under an alias", settings(OPEN, dict(cmd("-i", *HARD, unit=T),
+       **cmd("-i", "-o", "PasswordAuthentication yes", unit=J)), service=False, socket=SOCKET,
+       names=["ssh-conn@keepwell-probe.service"], loaded=[J]), True, False)
+expect("names unreadable", settings(files, service=False, socket=SOCKET, names=None), False, True)
+
+# An sshd running from a unit with another name is resolved too.
+expect("sshd in another unit with passwords on", settings(OPEN, dict(cmd("-D", *HARD),
+       **cmd("-D", "-o", "PasswordAuthentication yes", unit="my-sshd.service")), running=["my-sshd.service"]),
+       True, False)
+r = settings(files, dict(cmd("-D"), **cmd("-D", "-p", "2200", unit="my-sshd.service")), service=False,
+             running=["my-sshd.service"])
+if r["elsewhere"] != ["my-sshd.service"] or "2200" not in r["port"]:
+    bad.append("elsewhere: %r" % r)
+expect("sshd in sshd.service isn't elsewhere", settings(files, running=["sshd.service"]), False, False)
+expect("processes hidden", settings(files, running="hidden"), False, True)
+expect("unit with no command line", settings(files, {"sshd.service": []}), False, True)
 expect("overrides don't matter without Accept=yes", settings(files, unitdirs=dict(UNITDIRS, **{
        "/etc/systemd/system": [I + ".d"]})), False, False)
 

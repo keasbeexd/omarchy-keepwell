@@ -361,7 +361,9 @@ function outside(p, perms, now) {
 function remote(p) {
   var b = CATALOG.remote
   if (!p.installed) return check(b, { kind: "good", status: "No remote login running", meta: "SSH server not installed" })
-  var on = p.active === "active" || p.enabled === "enabled" || p.socket === true
+  // An sshd running from a unit with another name counts as on, too.
+  var elsewhere = Array.isArray(p.elsewhere) ? p.elsewhere : []
+  var on = p.active === "active" || p.enabled === "enabled" || p.socket === true || elsewhere.length > 0
   var keysOnly = p.passwords === false
   var root = p.rootLogin === "yes" ? "Allowed, with a password" : p.rootLogin === "no" ? "Not allowed"
     : p.rootLogin === "forced-commands-only" ? "Only for set commands" : "Keys only"
@@ -373,6 +375,7 @@ function remote(p) {
     fact("Firewall", p.firewallAllows ? "Lets SSH in" : "Doesn't list SSH", "UFW"),
     fact("Your keys", p.authorizedKeys ? plural(p.authorizedKeys, "key can log in as you", "keys can log in as you") : "None in ~/.ssh/authorized_keys")
   ]
+  if (elsewhere.length) facts.push(fact("Also running", "sshd from " + elsewhere.join(" · ")))
   var off = { label: "Turn off SSH…", elevated: true, act: "ssh-off" }
   if (!on) return check(b, { kind: "good", status: "No remote login running", meta: "SSH installed, turned off",
     facts: facts.slice(2), note: "If you turn SSH on, use keys rather than passwords." })
