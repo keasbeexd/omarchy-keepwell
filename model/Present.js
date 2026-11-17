@@ -5,7 +5,7 @@
 // a state, a sentence, the facts and the actions for each check. All of the
 // plugin's wording lives here; the helper only measures.
 //
-// build(doc, now) -> [section, ...] in the shape model/SampleData.js uses.
+// build(doc, now) -> [section, ...]: each { id, name, checks, hero }.
 // doc may be null (no result yet): every check then reads "Checking…".
 
 // ---------------------------------------------------------------- formatting
@@ -88,8 +88,34 @@ function check(base, fields) {
 // act: an action id in bin/keepwell-run (opens the confirm sheet, then runs
 // in a terminal if a step needs a password, in Keepwell if not); elevated
 // marks the ones that use the terminal. launch: a desktop entry to open. run: "network" re-runs checks
-// with arch-audit. None of these: arrives in a later build.
+// with arch-audit. The rest (scan, rescan, pick, stop, trashSet, url, unignore, and a fact's ack) are
+// handled in Service.qml's actionRequested.
 function install(label, act) { return { label: label, primary: true, elevated: true, act: act } }
+
+// ---------------------------------------------------------------- accepted
+// Findings you've looked at and decided to keep (bin/keepwell_accept.py).
+// They stay in the list, greyed out with a ticked "Accepted" box, but leave
+// the check's state, the shield and notifications. A finding's key changes
+// when the finding does (a new CVE, a new fixed version), so a change brings
+// it back. ACC is set by build() from the "accepted" probe.
+var ACC = {}
+function isAccepted(check, key) {
+  return typeof key === "string" && Array.isArray(ACC[check]) && ACC[check].indexOf(key) !== -1
+}
+// fact f, with the box to accept it: f.ack = { check, key, on }.
+function acceptable(f, check, key) {
+  if (typeof key !== "string" || !/^[0-9a-f]{16}$/.test(key)) return f
+  f.ack = { check: check, key: key, on: isAccepted(check, key) }
+  if (f.ack.on) f.owner = (f.owner ? f.owner + " · " : "") + "accepted by you"
+  return f
+}
+// Open findings first, accepted ones after, each group in its own order.
+function openFirst(list, check, keyOf) {
+  return list.filter(function(x) { return !isAccepted(check, keyOf(x)) })
+    .concat(list.filter(function(x) { return isAccepted(check, keyOf(x)) }))
+}
+function acceptedMeta(n) { return n ? " · " + n + " accepted" : "" }
+var ACCEPT_NOTE = "Tick Accepted on a finding you've looked at and decided to live with: it stays here, greyed out, and no longer raises this check or sends a notification. If it changes, it comes back."
 
 // ---------------------------------------------------------------- catalog
 
@@ -112,7 +138,7 @@ var CATALOG = {
     what: "An SSH server lets people log in to this computer over the network. Omarchy leaves it off. If you use it, keys are much safer than passwords, which can be guessed." },
 
   browser: { id: "browser", title: "Browser telemetry", tool: "Chromium",
-    what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting; changing them comes in a later build, and will only ever touch the settings you tick." },
+    what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting, and can install a privacy policy that turns off 14 of them (casting from Chromium stops working). Removing the policy gives you your own settings back." },
   netpriv: { id: "netpriv", title: "Network privacy", tool: "hosts · resolved · NetworkManager",
     what: "Small, optional settings that cut what this computer tells the network: telemetry hosts, backup DNS servers, Arch's connection check, your hardware address, local announcements and debug lookups. Each has a small cost, shown before anything changes." },
   apps: { id: "apps", title: "Data from your apps", tool: "Reporter",
@@ -182,44 +208,49 @@ function audit(p, net, now) {
     meta: "Runs when you ask — it uses the network", note: note,
     actions: [{ label: "Check now", primary: true, run: "network" }] })
 
-  var pkgs = p.packages || []
+  var all = p.packages || []
+  var ackOf = function(x) { return x.ack }
+  var pkgs = all.filter(function(x) { return !isAccepted("audit", x.ack) })
+  var accepted = all.length - pkgs.length
   // Lines of arch-audit's output Keepwell couldn't read are never taken as
   // "no known issues".
-  if (p.unparsed > 0 && !pkgs.length) return check(b, { kind: "attn", status: "Couldn't read arch-audit's report",
+  if (p.unparsed > 0 && !all.length) return check(b, { kind: "attn", status: "Couldn't read arch-audit's report",
     meta: plural(p.unparsed, "line", "lines") + " in a format Keepwell doesn't know", note: note,
     actions: [{ label: "Check again", primary: true, run: "network" }, { label: "Arch security tracker ↗", url: "https://security.archlinux.org/" }] })
   var fixable = pkgs.filter(function(x) { return x.fixed })
   var seriousFix = fixable.filter(function(x) { return x.severity === "Critical" || x.severity === "High" })
   var seriousOpen = pkgs.filter(function(x) { return !x.fixed && (x.severity === "Critical" || x.severity === "High") })
   var order = { Critical: 0, High: 1, Medium: 2, Low: 3, Unknown: 4 }
-  var facts = pkgs.slice().sort(function(x, y) {
+  var facts = openFirst(all.slice().sort(function(x, y) {
     return (x.fixed ? 0 : 1) - (y.fixed ? 0 : 1) || order[x.severity] - order[y.severity]
-  }).map(function(x) {
+  }), "audit", ackOf).map(function(x) {
     var f = fact(x.name, x.severity + " · " + auditKinds(x.kinds),
       (x.fixed ? "fixed in " + x.fixed + " — update" : "no fix released yet") + (x.cves ? " · " + plural(x.cves, "CVE", "CVEs") : ""))
     // Each package's page on the tracker lists its CVEs and their details.
     if (/^[A-Za-z0-9@._+-]{1,128}$/.test(x.name)) f.url = "https://security.archlinux.org/package/" + x.name
-    return f
+    return acceptable(f, "audit", x.ack)
   })
-  if (pkgs.length === 0) facts.push(fact("Packages", "No known issues"))
+  if (all.length === 0) facts.push(fact("Packages", "No known issues"))
   if (p.unparsed > 0) facts.push(fact("Unread", plural(p.unparsed, "line", "lines") + " of arch-audit's report Keepwell couldn't read"))
   facts.unshift(fact("Checked", ago(p.at, now), stamp(p.at)))
 
   // Only a released fix is something to act on. An open issue with no fix
   // is worth knowing about, never worth alarming anyone over.
-  var kind = seriousFix.length ? "crit" : fixable.length ? "attn" : seriousOpen.length ? "info" : "good"
+  var kind = seriousFix.length ? "crit" : fixable.length ? "attn" : seriousOpen.length || accepted ? "info" : "good"
   var status = fixable.length
     ? "An update fixes " + plural(fixable.length, "known issue", "known issues")
     : pkgs.length ? plural(pkgs.length, "package has", "packages have") + " known issues, none fixed yet"
+    : accepted ? "No known issues left to review"
     : "No known issues in installed packages"
   var meta = "Checked " + ago(p.at, now) + (fixable.length ? " · " + fixable.length + " fixable" : "")
     + (pkgs.length - fixable.length ? " · " + (pkgs.length - fixable.length) + " waiting for a fix" : "")
+    + acceptedMeta(accepted)
     + (p.refreshFailed ? " · couldn't refresh (offline?)" : p.skipped === "metered" ? " · not refreshed on a metered connection" : "")
   var whatNow = fixable.length
     ? "Updating installs the fixed versions. Issues still waiting for a fix need nothing from you yet."
     : "There is nothing to do right now: no fixed versions have been released. They arrive through normal updates, and Keepwell will flag them when they do. Most of these need someone to send you a specially crafted file or page."
   return check(b, { kind: kind, status: status, meta: meta, facts: facts,
-    note: whatNow + " Click a package to see its CVEs on the Arch security tracker. " + note,
+    note: whatNow + " Click a package to see its CVEs on the Arch security tracker." + (all.length ? " " + ACCEPT_NOTE : "") + " " + note,
     actions: (fixable.length ? [{ label: "Update system", primary: true, elevated: true, act: "update" }] : [])
       .concat([{ label: "Check again", run: "network" }, { label: "Arch security tracker ↗", url: "https://security.archlinux.org/" }]) })
 }
@@ -330,32 +361,40 @@ function outside(p, perms, now) {
   var tools = [["cargo install", list(p.cargo)], ["go install", list(p.go)], ["pipx", list(p.pipx)], ["uv tool", list(p.uv)]]
     .filter(function(t) { return t[1].length })
   var flatpaks = perms && perms.apps > 0 ? perms.apps : 0
-  var facts = []
-  hand.forEach(function(h) {
-    facts.push(fact(h.name, h.shadows ? "Hides the packaged " + h.name + " in /usr/bin — you may be running an old copy"
-      : h.appimage ? "AppImage — update it from where you downloaded it" : "Program copied in by hand — nothing updates it", h.where))
+  var facts = [], later = []
+  var aurAcks = list(p.notInAurAcks)
+  openFirst(hand, "outside", function(h) { return h.ack }).forEach(function(h) {
+    var f = acceptable(fact(h.name, h.shadows ? "Hides the packaged " + h.name + " in /usr/bin — you may be running an old copy"
+      : h.appimage ? "AppImage — update it from where you downloaded it" : "Program copied in by hand — nothing updates it", h.where), "outside", h.ack);
+    (f.ack && f.ack.on ? later : facts).push(f)
   })
-  notInAur.forEach(function(n) { facts.push(fact(n, "Not in the AUR any more — omarchy update can't update it", "built yourself")) })
+  notInAur.forEach(function(n, i) {
+    var f = acceptable(fact(n, "Not in the AUR any more — omarchy update can't update it", "built yourself"), "outside", aurAcks[i]);
+    (f.ack && f.ack.on ? later : facts).push(f)
+  })
   tools.forEach(function(t) { facts.push(fact(t[0], t[1].join(", "), "update with " + t[0].split(" ")[0])) })
   if (flatpaks) facts.push(fact("Flatpak", plural(flatpaks, "app", "apps"), "update with flatpak update"))
   var aur = p.foreign > 0 ? (p.aurAt ? "AUR checked " + ago(p.aurAt, now) + (p.refreshFailed ? " (couldn't reach it this time)" : "")
     : "AUR not checked yet — Refresh asks it") : ""
   var count = facts.length
+  var acceptedOut = later.length
+  facts = facts.concat(later)
   var inAur = list(p.inAur)
   if (inAur.length) facts.push(fact(plural(inAur.length, "AUR package", "AUR packages"), inAur.join(", "),
     "omarchy update keeps " + (inAur.length === 1 ? "it" : "these") + " updated · " + aur))
   else if (p.foreign > 0 && !p.aurAt) facts.push(fact("AUR packages", plural(p.foreign, "package", "packages") + " from outside the official repositories", aur))
   var actions = flatpaks ? [{ label: "Update Flatpak apps…", primary: true, act: "flatpak-update" }] : []
-  var shadows = hand.filter(function(h) { return h.shadows })
-  if (!count) return check(b, { kind: "good", status: "omarchy update covers everything",
-    meta: inAur.length ? "Includes " + plural(inAur.length, "AUR package", "AUR packages") : "Packages and mise tools",
-    facts: facts })
+  var shadows = hand.filter(function(h) { return h.shadows && !isAccepted("outside", h.ack) })
+  if (!count) return check(b, { kind: acceptedOut ? "info" : "good",
+    status: acceptedOut ? "omarchy update covers everything else" : "omarchy update covers everything",
+    meta: (inAur.length ? "Includes " + plural(inAur.length, "AUR package", "AUR packages") : "Packages and mise tools") + acceptedMeta(acceptedOut),
+    facts: facts, actions: actions, note: acceptedOut ? ACCEPT_NOTE : "" })
   return check(b, { kind: shadows.length ? "attn" : "info",
     status: shadows.length ? shadows[0].name + " in " + shadows[0].where + " hides the packaged one"
       : count === 1 ? "One thing omarchy update misses" : word(count) + " things omarchy update misses",
-    meta: facts.slice(0, Math.min(count, 3)).map(function(f) { return f.k }).join(" · "),
+    meta: facts.slice(0, Math.min(count, 3)).map(function(f) { return f.k }).join(" · ") + acceptedMeta(acceptedOut),
     facts: facts, actions: actions,
-    note: "These don't get security fixes from omarchy update. Update each the way it was installed — or remove what you no longer use." })
+    note: "These don't get security fixes from omarchy update. Update each the way it was installed — or remove what you no longer use. " + ACCEPT_NOTE })
 }
 
 function remote(p) {
@@ -438,13 +477,17 @@ function leaks(tools, now) {
     meta: "Read-only: it reports, it never changes a repo", facts: [fact("Installed", "Yes")],
     note: "Keepwell finds the git repositories in your home folder (up to four levels down, following links like ~/Projects) and checks their history in the background. Secrets are masked; only where they are is kept.",
     actions: [home, choose] })
-  var f = last.findings || []
+  var allLeaks = openFirst(last.findings || [], "leaks", function(x) { return x.ack })
+  var f = allLeaks.filter(function(x) { return !isAccepted("leaks", x.ack) })
+  var acceptedLeaks = allLeaks.length - f.length
   var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder), scannedFact(last.at, now),
                fact("Repositories", plural(last.scanned, "scanned", "scanned") + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
   var gap = searchGap(last)
   if (gap) facts.push(fact("Not searched", gap))
-  for (var i = 0; i < Math.min(f.length, 30); i++)
-    facts.push(fact(f[i].repo, f[i].file + (f[i].line ? ":" + f[i].line : ""), f[i].rule + (f[i].commit ? " · " + f[i].commit : "")))
+  for (var i = 0; i < Math.min(allLeaks.length, 30); i++) {
+    var l = allLeaks[i]
+    facts.push(acceptable(fact(l.repo, l.file + (l.line ? ":" + l.line : ""), l.rule + (l.commit ? " · " + l.commit : "")), "leaks", l.ack))
+  }
   // A repository gitleaks couldn't finish (error, timeout, huge report), or
   // a part of the folder the search never reached, is never counted as clean.
   if ((last.failed || gap) && !f.length) return check(b, { kind: "attn",
@@ -454,12 +497,13 @@ function leaks(tools, now) {
     facts: facts,
     actions: [{ label: "Scan again", primary: true, rescan: "leaks", folder: last.folder }]
       .concat(last.folder === "~" ? [choose] : [home, choose]) })
-  return check(b, { kind: f.length ? "attn" : "good",
+  return check(b, { kind: f.length ? "attn" : acceptedLeaks ? "info" : "good",
     status: f.length ? (last.capped ? "At least " : "") + plural(f.length, "possible secret", "possible secrets") + " in your repositories"
+      : acceptedLeaks ? "No possible secrets left to review"
       : last.repos ? "No secrets found" : "No git repositories in that folder",
-    meta: "Scanned " + ago(last.at, now) + " · " + plural(last.repos, "repository", "repositories"),
+    meta: "Scanned " + ago(last.at, now) + " · " + plural(last.repos, "repository", "repositories") + acceptedMeta(acceptedLeaks),
     facts: facts,
-    note: f.length ? "Each line is a file and line where something looks like a key or password, and the commit it was added in. If it's real, change that password or key — removing it from the file doesn't remove it from git history." : "",
+    note: allLeaks.length ? "Each line is a file and line where something looks like a key or password, and the commit it was added in. If it's real, change that password or key — removing it from the file doesn't remove it from git history. If it isn't (a test key, an example), accept it. " + ACCEPT_NOTE : "",
     actions: [{ label: "Scan again", primary: f.length > 0, rescan: "leaks", folder: last.folder }]
       .concat(last.folder === "~" ? [choose] : [home, choose]) })
 }
@@ -494,14 +538,16 @@ function deps(tools, now) {
     meta: "Reads your projects' lockfiles; changes nothing", facts: [fact("Installed", "Yes")],
     note: "Keepwell finds your projects (git repositories up to four levels down) and checks each one in the background. " + network,
     actions: [home, choose] })
-  var f = last.findings || []
+  var allDeps = openFirst(last.findings || [], "deps", function(x) { return x.ack })
+  var f = allDeps.filter(function(x) { return !isAccepted("deps", x.ack) })
+  var acceptedDeps = allDeps.length - f.length
   var fixable = f.filter(function(x) { return x.fixable })
   var facts = [fact("Folder", last.folder === "~" ? "Home folder" : last.folder), scannedFact(last.at, now),
                fact("Projects", plural(last.scanned, "scanned", "scanned")
                  + (last.noLockfiles ? " · " + last.noLockfiles + " without dependency files" : "")
                  + (last.failed ? " · " + last.failed + " couldn't be read" : ""))]
-  for (var i = 0; i < Math.min(f.length, 40); i++) {
-    var x = f[i]
+  for (var i = 0; i < Math.min(allDeps.length, 40); i++) {
+    var x = allDeps[i]
     var fixes = (x.vulns || []).reduce(function(all, v) { return all.concat(v.fixed || []) }, [])
     var target = fixes.length ? fixes.reduce(newer) : ""
     var cves = (x.vulns || []).map(function(v) { return v.cve }).filter(function(c) { return c })
@@ -512,7 +558,7 @@ function deps(tools, now) {
       (x.fixable ? "update to " + target + " or later" : target ? "partly fixed in " + target : "no fix released yet")
         + " · " + x.repo + "/" + x.file + (x.ecosystem ? " (" + x.ecosystem + ")" : ""))
     if (x.vulns && x.vulns[0] && /^[A-Za-z0-9._:-]{1,64}$/.test(x.vulns[0].id)) row.url = "https://osv.dev/vulnerability/" + x.vulns[0].id
-    facts.push(row)
+    facts.push(acceptable(row, "deps", x.ack))
   }
   // A project osv-scanner couldn't check (offline, OSV.dev unreachable), or
   // a part of the folder the search never reached, is never counted as clean.
@@ -526,14 +572,15 @@ function deps(tools, now) {
     actions: [{ label: "Scan again", primary: true, rescan: "osv", folder: last.folder }]
       .concat(last.folder === "~" ? [choose] : [home, choose]) })
   return check(b, {
-    kind: fixable.length || last.failed || gap ? "attn" : f.length ? "info" : "good",
+    kind: fixable.length || last.failed || gap ? "attn" : f.length || acceptedDeps ? "info" : "good",
     status: f.length ? plural(f.length, "dependency has", "dependencies have") + " known vulnerabilities"
+      : acceptedDeps ? "No vulnerable dependencies left to review"
       : !last.scanned ? "No projects found in that folder"
       : last.noLockfiles >= last.scanned ? "Nothing to check: no dependency files in " + plural(last.scanned, "project", "projects")
       : "No known vulnerabilities in your projects' dependencies",
-    meta: "Scanned " + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects") + (fixable.length ? " · " + fixable.length + " fixable by updating" : ""),
+    meta: "Scanned " + ago(last.at, now) + " · " + plural(last.scanned, "project", "projects") + (fixable.length ? " · " + fixable.length + " fixable by updating" : "") + acceptedMeta(acceptedDeps),
     facts: facts,
-    note: f.length ? "Each row is a library one of your projects uses, the worst problem it has, and the version that fixes it. Update it in that project (for example npm update, cargo update, go get -u, pip install -U), then scan again. Click a row for the advisory on osv.dev. Keepwell never changes your projects. " + network : network,
+    note: allDeps.length ? "Each row is a library one of your projects uses, the worst problem it has, and the version that fixes it. Update it in that project (for example npm update, cargo update, go get -u, pip install -U), then scan again. Click a row for the advisory on osv.dev. Keepwell never changes your projects. " + ACCEPT_NOTE + " " + network : network,
     actions: [{ label: "Scan again", primary: fixable.length > 0, rescan: "osv", folder: last.folder }]
       .concat(last.folder === "~" ? [choose] : [home, choose]) })
 }
@@ -849,16 +896,20 @@ function schedules(doc, now) {
 
 function failed(p) {
   var b = CATALOG.failed
-  var units = Array.isArray(p.units) ? p.units : []
+  var all = openFirst(Array.isArray(p.units) ? p.units : [], "failed", function(u) { return u.ack })
+  var units = all.filter(function(u) { return !isAccepted("failed", u.ack) })
+  var accepted = all.length - units.length
   var more = typeof p.more === "number" && p.more > 0 ? p.more : 0
-  if (!units.length) return check(b, { kind: "good", status: "All services are running" })
-  return check(b, { kind: "info", status: plural(units.length + more, "service has failed", "services have failed"),
+  if (!all.length) return check(b, { kind: "good", status: "All services are running" })
+  return check(b, { kind: units.length || more ? "info" : "good",
+    status: units.length || more ? plural(units.length + more, "service has failed", "services have failed")
+      : plural(accepted, "expected failure", "expected failures") + ", nothing new",
     meta: [[units.filter(function(u) { return !u.user }).length, "system"], [units.filter(function(u) { return u.user }).length, "yours"]]
-      .filter(function(x) { return x[0] }).map(function(x) { return x[0] + " " + x[1] }).join(" · "),
-    facts: units.map(function(u) { return fact(u.user ? "Yours" : "System", u.description || u.unit, u.unit) }),
-    note: "Clearing the list forgets these failures; nothing is restarted. A service that fails again shows up again.",
+      .filter(function(x) { return x[0] }).map(function(x) { return x[0] + " " + x[1] }).join(" · ") + acceptedMeta(accepted),
+    facts: all.map(function(u) { return acceptable(fact(u.user ? "Yours" : "System", u.description || u.unit, u.unit), "failed", u.ack) }),
+    note: "Clearing the list forgets these failures; nothing is restarted. A service that fails again shows up again. Tick Accepted on one you expect to fail (a feature your hardware doesn't have): it stays greyed out and isn't counted.",
     actions: [{ label: "Show details", primary: true, act: "failed-details" },
-      { label: "Clear the list…", elevated: units.some(function(u) { return !u.user }), act: "failed-reset" }] })
+      { label: "Clear the list…", elevated: all.some(function(u) { return !u.user }), act: "failed-reset" }] })
 }
 
 function loading(id) {
@@ -886,6 +937,7 @@ function build(doc, now) {
   var probes = doc && doc.probes ? doc.probes : null
   var net = doc ? doc.network === true : false
   function p(name) { return probes && probes[name] && typeof probes[name] === "object" ? probes[name] : {} }
+  ACC = p("accepted")
   var makers = {
     audit: function() { return audit(p("audit"), net, now) },
     av: function() { return antivirus(p("antivirus"), now) },

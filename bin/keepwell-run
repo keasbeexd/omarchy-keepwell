@@ -22,6 +22,8 @@
     keepwell-run unclaimed days <n> | ignore <id>... | unignore
                                               the unclaimed finder's settings
     keepwell-run virus allow <id> | forget    mark a flagged file as not a threat; undo all
+    keepwell-run accept <check> <key> on|off  accept a finding (audit, deps, leaks, outside,
+                                              failed): shown greyed, never notified
     keepwell-run scan  downloads|home         start a ClamAV scan in the background
     keepwell-run leaks <folder>               start a gitleaks scan in the background
     keepwell-run osv <folder>                 start an osv-scanner scan in the background
@@ -78,6 +80,7 @@ import keepwell_unclaimed  # noqa: E402
 import keepwell_schedule  # noqa: E402
 import keepwell_caches  # noqa: E402
 import keepwell_ufw  # noqa: E402
+import keepwell_accept  # noqa: E402
 
 OMARCHY = "/usr/bin/omarchy"
 SUDO = "/usr/bin/sudo"
@@ -1350,6 +1353,27 @@ def _infected(log):
     return max(n - len(hidden), len(shown))
 
 
+def _open_findings(doc, check):
+    """(findings you haven't accepted, how many you have) in a gitleaks or
+    osv-scanner result."""
+    key = keepwell_accept.leak_key if check == "leaks" else keepwell_accept.dep_key
+    acc = keepwell_accept.accepted(check)
+    found = [f for f in doc.get("findings") or [] if isinstance(f, dict)]
+    shown = [f for f in found if key(doc.get("folder", ""), f) not in acc]
+    return shown, len(found) - len(shown)
+
+
+def _open_count(doc, shown, accepted):
+    """How many findings are left to review: osv.json's "packages" can be
+    more than the 100 findings it keeps; accepted ones are among those kept."""
+    total = doc.get("packages") if isinstance(doc.get("packages"), int) else 0
+    return max(len(shown), total - accepted)
+
+
+def _accepted_words(n):
+    return " (%d accepted)" % n if n else ""
+
+
 def _this_run(at, since):
     """True when a result was made by the run that started at `since`."""
     return isinstance(at, int) and isinstance(since, int) and at >= since
@@ -1393,12 +1417,14 @@ def notify(kind, quiet=False, since=None):
         if not doc.get("finished") or not _this_run(doc.get("at"), since):
             title, body = "Dependency scan stopped", "Stopped before the end."
         else:
-            n = doc.get("packages", 0)
-            fixable = sum(1 for f in doc.get("findings") or [] if f.get("fixable"))
+            shown, accepted = _open_findings(doc, "deps")
+            n = _open_count(doc, shown, accepted)
+            fixable = sum(1 for f in shown if f.get("fixable"))
             gap = search_gap_text(doc)
             title = "Dependency scan finished" if not doc.get("failed") and not gap else "Dependency scan incomplete"
             body = ("%d package%s with known vulnerabilities (%d fixable)" % (n, "" if n == 1 else "s", fixable)
-                    if n else "No known vulnerabilities" if not gap else "Nothing found") \
+                    if n else ("No new vulnerabilities" if accepted else "No known vulnerabilities") if not gap
+                    else "Nothing found") + _accepted_words(accepted) \
                 + " in %d project%s." % (doc.get("scanned", 0), "" if doc.get("scanned", 0) == 1 else "s") \
                 + (" %d couldn't be checked (offline?)." % doc["failed"] if doc.get("failed") else "") \
                 + (" " + gap[0].upper() + gap[1:] + "." if gap else "")
@@ -1407,11 +1433,13 @@ def notify(kind, quiet=False, since=None):
         if not doc.get("finished") or not _this_run(doc.get("at"), since):
             title, body = "Secrets scan stopped", "Stopped before the end."
         else:
-            n, repos, bad = len(doc.get("findings") or []), doc.get("scanned", 0), doc.get("failed", 0)
+            shown, accepted = _open_findings(doc, "leaks")
+            n, repos, bad = len(shown), doc.get("scanned", 0), doc.get("failed", 0)
             gap = search_gap_text(doc)
             title = "Secrets scan finished" if not bad and not gap else "Secrets scan incomplete"
             body = ("%s%d possible secret%s" % ("at least " if doc.get("capped") else "", n, "" if n == 1 else "s") if n
-                    else "No secrets found" if not bad and not gap else "Nothing found") + \
+                    else ("No new secrets found" if accepted else "No secrets found") if not bad and not gap
+                    else "Nothing found") + _accepted_words(accepted) + \
                 " in %d repositor%s." % (repos, "y" if repos == 1 else "ies") + \
                 (" %d couldn't be scanned." % bad if bad else "") + \
                 (" " + gap[0].upper() + gap[1:] + "." if gap else "")
@@ -1723,8 +1751,9 @@ def _deep_summary(parts, runs, skipped):
             said.append("%s stopped before the end" % label)
             continue
         gap = search_gap_text(doc)
+        shown, accepted = _open_findings(doc, part if part == "leaks" else "deps")
         if part == "leaks":
-            n = len(doc.get("findings") or [])
+            n = len(shown)
             if n:
                 said.append("%s%d possible secret%s" % ("at least " if doc.get("capped") else "", n, "" if n == 1 else "s")
                             + (" (scan incomplete: %s)" % gap if gap else ""))
@@ -1733,9 +1762,9 @@ def _deep_summary(parts, runs, skipped):
                     ([("%d repositor%s couldn't be scanned" % (doc["failed"], "y" if doc["failed"] == 1 else "ies"))]
                      if doc.get("failed") else []) + ([gap] if gap else [])))
             else:
-                said.append("no secrets found")
+                said.append("no new secrets found" + _accepted_words(accepted) if accepted else "no secrets found")
         else:
-            n = doc.get("packages", 0)
+            n = _open_count(doc, shown, accepted)
             if n:
                 said.append("%d dependenc%s with known vulnerabilities" % (n, "y" if n == 1 else "ies")
                             + (" (scan incomplete: %s)" % gap if gap else ""))
@@ -1744,7 +1773,8 @@ def _deep_summary(parts, runs, skipped):
                     (["%d project%s couldn't be checked (offline?)" % (doc["failed"], "" if doc["failed"] == 1 else "s")]
                      if doc.get("failed") else []) + ([gap] if gap else [])))
             else:
-                said.append("no vulnerable dependencies")
+                said.append("no new vulnerable dependencies" + _accepted_words(accepted) if accepted
+                            else "no vulnerable dependencies")
     text_value = "; ".join(said) or "nothing to scan"
     return text_value[:1].upper() + text_value[1:] + "."
 
@@ -2136,6 +2166,13 @@ def main():
             return 2
         sys.stdout.write(json.dumps({"saved": True}))
         return 0
+    if len(args) == 4 and args[0] == "accept" and args[3] in ("on", "off"):
+        try:
+            saved = keepwell_accept.mark(args[1], args[2], args[3] == "on")
+        except (OSError, ValueError):
+            saved = False
+        sys.stdout.write(json.dumps({"saved": saved}))
+        return 0 if saved else 2
     if len(args) == 3 and args[:2] == ["virus", "allow"] and re.fullmatch(r"[0-9a-f]{16}", args[2]):
         found = _virus_found().get(args[2])
         sys.stdout.write(json.dumps({"saved": bool(found) and keepwell_av.allow(*found)}))

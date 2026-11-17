@@ -79,6 +79,10 @@ Item {
   property var selection: [0, 0, 0]
   // Keyboard cursor over the detail pane's actions; -1 while it is on the list.
   property int actionCursor: -1
+  // Keyboard cursor over the findings' Accepted boxes: the key of the
+  // finding it is on (it follows the row when ticking moves it), or "".
+  // Only one of the two cursors is shown at a time.
+  property string ackCursor: ""
   property string notice: ""
   property string version: ""
 
@@ -110,6 +114,7 @@ Item {
     if (sections.length === 0) return
     sectionIndex = (i + sections.length) % sections.length
     actionCursor = -1
+    ackCursor = ""
     notice = ""
   }
 
@@ -119,7 +124,35 @@ Item {
     next[sectionIndex] = Math.max(0, Math.min(checks.length - 1, i))
     selection = next
     actionCursor = -1
+    ackCursor = ""
     notice = ""
+  }
+
+  // The current check's findings that have an Accepted box, in screen order.
+  function ackKeys() {
+    return (check.facts || []).filter(function(f) { return f.ack && typeof f.ack.key === "string" })
+      .map(function(f) { return f.ack.key })
+  }
+  // Step the Accepted cursor by one finding (+1 down, -1 up).
+  function moveAck(step) {
+    var keys = ackKeys()
+    if (!keys.length) return
+    var at = keys.indexOf(ackCursor)
+    at = at === -1 ? (step > 0 ? 0 : keys.length - 1) : Math.max(0, Math.min(keys.length - 1, at + step))
+    ackCursor = keys[at]
+    actionCursor = -1
+  }
+  // Tick or untick the finding under the cursor.
+  function toggleAck() {
+    var facts = check.facts || []
+    for (var i = 0; i < facts.length; i++) {
+      var a = facts[i].ack
+      if (a && a.key === ackCursor) {
+        actionRequested({ accept: a.key, check: a.check, on: a.on !== true }, check.id || "", "")
+        return
+      }
+    }
+    ackCursor = ""
   }
 
   function activateAction(i) {
@@ -139,6 +172,7 @@ Item {
         next[s] = c
         selection = next
         actionCursor = -1
+        ackCursor = ""
         return
       }
     }
@@ -205,9 +239,18 @@ Item {
             return
           }
           var actions = root.check.actions || []
+          var shift = (event.modifiers & Qt.ShiftModifier) !== 0
           if (event.key === Qt.Key_Escape) {
             if (root.actionCursor >= 0) root.actionCursor = -1
+            else if (root.ackCursor !== "") root.ackCursor = ""
             else root.hide()
+          } else if (shift && (event.key === Qt.Key_Down || event.key === Qt.Key_J)) {
+            root.moveAck(1)
+          } else if (shift && (event.key === Qt.Key_Up || event.key === Qt.Key_K)) {
+            root.moveAck(-1)
+          } else if (root.ackCursor !== "" && (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                                                  || event.key === Qt.Key_Enter)) {
+            root.toggleAck()
           } else if (event.key === Qt.Key_Tab) {
             root.selectSection(root.sectionIndex + 1)
           } else if (event.key === Qt.Key_Backtab) {
@@ -218,8 +261,10 @@ Item {
             root.selectCheck(root.checkIndex - 1)
           } else if (event.key === Qt.Key_Right || event.key === Qt.Key_L) {
             if (actions.length > 0) root.actionCursor = Math.min(actions.length - 1, root.actionCursor + 1)
+            root.ackCursor = ""
           } else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) {
             root.actionCursor = Math.max(-1, root.actionCursor - 1)
+            root.ackCursor = ""
           } else if (event.key === Qt.Key_R || event.key === Qt.Key_F5) {
             root.notice = ""
             root.checkRequested(true)
@@ -453,8 +498,12 @@ Item {
                   Layout.fillHeight: true
                   check: root.check
                   cursorAction: root.actionCursor
+                  cursorAck: root.ackCursor
                   onActionActivated: function(index) { root.activateAction(index) }
                   onLinkActivated: function(url) { root.actionRequested({ url: url }, root.check.id || "", "") }
+                  onAcceptToggled: function(checkId, key, on) {
+                    root.actionRequested({ accept: key, check: checkId, on: on }, root.check.id || "", "")
+                  }
                 }
               }
             }
@@ -476,7 +525,9 @@ Item {
               spacing: Tokens.sp(18)
               visible: root.notice === "" || footerRow.width >= hints.implicitWidth + noticeText.implicitWidth + Tokens.sp(36)
               Repeater {
-                model: [["↑↓", "move"], ["←→", "actions"], ["Tab", "next section"], ["Enter", "do it"], ["R", "refresh"], ["S", "schedule"]]
+                model: [["↑↓", "move"], ["←→", "actions"]]
+                  .concat(root.ackKeys().length ? [["Shift+↑↓ Space", "accept"]] : [])
+                  .concat([["Tab", "next section"], ["Enter", "do it"], ["R", "refresh"], ["S", "schedule"]])
                   .concat(root.schedules.missed && root.schedules.missed.length ? [["M", "run missed"], ["D", "dismiss"]] : [])
                   .concat([["Esc", "close"]])
                 delegate: Row {

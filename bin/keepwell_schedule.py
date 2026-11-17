@@ -15,7 +15,6 @@ Settings live in schedules.json, what happened in runs.json.
 """
 
 import json
-import os
 import re
 import time
 
