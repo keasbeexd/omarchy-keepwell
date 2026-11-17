@@ -19,7 +19,7 @@ can't open on Wayland. The full design is in
 
 - **A shield in the bar**: a plain outline when all is well, a dot when
   something wants a look, an exclamation mark when something needs action.
-- **Twenty checks in three sections**: Privacy, Security and System Care,
+- **Nineteen checks in three sections**: Privacy, Security and System Care,
   each check explained in plain words with the next step to take.
 - **Quick checks by themselves**: at login and every hour, about a second,
   read-only. One notification when something newly needs attention.

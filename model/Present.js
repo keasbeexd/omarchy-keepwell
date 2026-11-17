@@ -5,7 +5,7 @@
 // a state, a sentence, the facts and the actions for each check. All of the
 // plugin's wording lives here; the helper only measures.
 //
-// build(doc, now) -> [section, ...] in the shape model/SampleData.js uses.
+// build(doc, now) -> [section, ...]: each { id, name, checks, hero }.
 // doc may be null (no result yet): every check then reads "Checking…".
 
 // ---------------------------------------------------------------- formatting
@@ -88,7 +88,8 @@ function check(base, fields) {
 // act: an action id in bin/keepwell-run (opens the confirm sheet, then runs
 // in a terminal if a step needs a password, in Keepwell if not); elevated
 // marks the ones that use the terminal. launch: a desktop entry to open. run: "network" re-runs checks
-// with arch-audit. None of these: arrives in a later build.
+// with arch-audit. The rest (scan, rescan, pick, stop, trashSet, url, unignore, and a fact's ack) are
+// handled in Service.qml's actionRequested.
 function install(label, act) { return { label: label, primary: true, elevated: true, act: act } }
 
 // ---------------------------------------------------------------- accepted
@@ -137,7 +138,7 @@ var CATALOG = {
     what: "An SSH server lets people log in to this computer over the network. Omarchy leaves it off. If you use it, keys are much safer than passwords, which can be guessed." },
 
   browser: { id: "browser", title: "Browser telemetry", tool: "Chromium",
-    what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting; changing them comes in a later build, and will only ever touch the settings you tick." },
+    what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting, and can install a privacy policy that turns off 14 of them (casting from Chromium stops working). Removing the policy gives you your own settings back." },
   netpriv: { id: "netpriv", title: "Network privacy", tool: "hosts · resolved · NetworkManager",
     what: "Small, optional settings that cut what this computer tells the network: telemetry hosts, backup DNS servers, Arch's connection check, your hardware address, local announcements and debug lookups. Each has a small cost, shown before anything changes." },
   apps: { id: "apps", title: "Data from your apps", tool: "Reporter",
