@@ -9,14 +9,31 @@ Rectangle {
 
   property var check: ({ facts: [], actions: [] })
   property int cursorAction: -1
+  // The key of the finding whose Accepted box has the keyboard cursor, or "".
+  property string cursorAck: ""
 
   signal actionActivated(int index)
   signal linkActivated(string url)
   // A finding's "Accepted" box: Present.js's fact.ack { check, key, on }.
   signal acceptToggled(string checkId, string key, bool on)
 
+  // Scroll so that item (a fact row) is fully visible.
+  function reveal(item) {
+    if (!item) return
+    var y = item.mapToItem(content, 0, 0).y
+    var bottom = y + item.height
+    if (y < flick.contentY) flick.contentY = Math.max(0, y)
+    else if (bottom > flick.contentY + flick.height)
+      flick.contentY = Math.min(Math.max(0, flick.contentHeight - flick.height), bottom - flick.height)
+  }
+
   readonly property string kind: check.kind || "off"
   readonly property var actions: check.actions || []
+  readonly property bool anyAck: {
+    var facts = check.facts || []
+    for (var i = 0; i < facts.length; i++) if (facts[i].ack) return true
+    return false
+  }
   readonly property bool anyElevated: {
     for (var i = 0; i < actions.length; i++) if (actions[i].elevated) return true
     return false
@@ -155,6 +172,14 @@ Rectangle {
             readonly property var ack: modelData.ack || null
             // An accepted finding stays readable, just quieter.
             readonly property bool accepted: !!ack && ack.on === true
+            readonly property bool current: !!ack && ack.key === root.cursorAck
+            // Keep the row the keyboard is on in view.
+            onCurrentChanged: if (current) Qt.callLater(root.reveal, row)
+            Rectangle {
+              visible: row.current
+              anchors.fill: parent
+              color: Tokens.fill2
+            }
             width: parent.width
             height: Math.max(k.implicitHeight, valueCol.implicitHeight, ackBox.visible ? ackBox.implicitHeight : 0) + Tokens.sp(16)
             KText {
@@ -216,6 +241,7 @@ Rectangle {
               anchors.topMargin: Tokens.sp(8)
               label: "Accepted"
               checked: row.accepted
+              hasCursor: row.current
               onToggled: root.acceptToggled(row.ack.check, row.ack.key, !row.accepted)
             }
           }
@@ -259,6 +285,15 @@ Rectangle {
             onActivated: root.actionActivated(index)
           }
         }
+      }
+
+      KText {
+        visible: root.anyAck
+        Layout.fillWidth: true
+        text: "Shift+↑↓ (or Shift+J/K) picks a finding, Space ticks or unticks Accepted."
+        font.pixelSize: Tokens.caption
+        color: Tokens.fg3
+        wrapMode: Text.WordWrap
       }
 
       KText {

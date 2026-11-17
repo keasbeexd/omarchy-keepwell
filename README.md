@@ -86,6 +86,8 @@ theme.
 |---------------|-------------------------------|
 | ↑ ↓ / j k     | move through checks           |
 | ← → / h l     | move through a check's actions|
+| Shift+↑ ↓ / Shift+J K | move through a check's findings that have an Accepted box |
+| Space         | tick or untick Accepted on the selected finding (Enter does too) |
 | Tab / Shift+Tab | next / previous section     |
 | Enter         | run the selected (or primary) action |
 | R / F5        | Refresh: run every quick check again now |
@@ -407,7 +409,8 @@ key gitleaks flags, a library with no fix that your project needs, a
 program you build yourself, a service your hardware has no use for. Tick
 **Accepted** on that row in Known vulnerabilities, Dependency
 vulnerabilities, Secrets in your code, Software outside updates or Failed
-services. The row stays in the list, greyed out and marked "accepted by
+services (from the keyboard: Shift+↑↓ or Shift+J/K to pick the finding,
+Space to tick it). The row stays in the list, greyed out and marked "accepted by
 you", but it no longer counts toward the check's state, the shield, the
 hourly notification, or the notification and deep-scan summary at the end
 of a secrets or dependency scan (which say how many were accepted). Untick
