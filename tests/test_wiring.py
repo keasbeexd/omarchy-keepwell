@@ -22,7 +22,12 @@ own = {"sectionIndex", "selection", "actionCursor", "notice", "openedOn"}
 missing = [f"signal {s}" for s in signals if f"item.{s}.connect(" not in service]
 missing += [f"property {p}" for p in properties
             if p not in own and f"item.{p} = Qt.binding(" not in service]
+# The detail pane's signals must each be handled where Window.qml uses it.
+pane = (root / "ui" / "DetailPane.qml").read_text()
+pane_signals = re.findall(r"(?m)^  signal (\w+)\(", pane)
+missing += ["DetailPane signal %s (Window.qml)" % s for s in pane_signals
+            if "on" + s[0].upper() + s[1:] + ":" not in window]
 if missing:
     print("Not wired in Service.qml:\n  " + "\n  ".join(missing))
     sys.exit(1)
-print(f"ok: {len(signals)} signals and {len(properties) - len(own & set(properties))} properties wired")
+print(f"ok: {len(signals) + len(pane_signals)} signals and {len(properties) - len(own & set(properties))} properties wired")

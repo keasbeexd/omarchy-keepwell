@@ -37,6 +37,10 @@ can't open on Wayland. The full design is in
   packages and journals through `paccache`, `pacman` and `journalctl`.
 - **Firewall rules in the window**: allow a port or remove rules from the
   Firewall check, with the same confirm step and visible terminal.
+- **Accept what you've weighed**: tick Accepted on a known vulnerability,
+  a vulnerable dependency, a possible secret, a program outside updates or
+  a service you expect to fail. It stays listed, greyed out, and stops
+  raising the check or sending notifications until it changes.
 - **Optional tools on request**: arch-audit, ClamAV, UFW, gitleaks,
   osv-scanner and Flatseal install only when you ask. Without them
   the check says "not installed".
@@ -214,6 +218,7 @@ at 0600, written through a fresh temporary file and a rename.
 | `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
 | `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
 | `av-allowed.json` | files the virus scan flagged that you marked as not a threat: each one's path, SHA-256 and the signature it matched |
+| `accepted.json` | findings you accepted, per check: a 16-hex-digit key for each (see Accepted findings), nothing else |
 | `schedules.json` | your deep-scan schedule: days, time, which scans, the battery rule (kept when you turn it off, so turning it on again starts from there) |
 | `runs.json` | the last deep-scan run's time and one-line summary, and which missed run you were told about or dismissed |
 | `aur.json` | the last AUR answer: when it was asked, which foreign package names were checked, and which the AUR no longer has |
@@ -394,6 +399,36 @@ result is never announced as this one's.
   1,204 files checked in 12 s."), and calls `omarchy-shell keepwell refresh`.
   Keepwell deletes, moves or changes nothing it finds; infected files are
   listed for you to decide on.
+
+### Accepted findings
+
+Some findings are known and deliberate: a package you hold back, a test
+key gitleaks flags, a library with no fix that your project needs, a
+program you build yourself, a service your hardware has no use for. Tick
+**Accepted** on that row in Known vulnerabilities, Dependency
+vulnerabilities, Secrets in your code, Software outside updates or Failed
+services. The row stays in the list, greyed out and marked "accepted by
+you", but it no longer counts toward the check's state, the shield, the
+hourly notification, or the notification and deep-scan summary at the end
+of a secrets or dependency scan (which say how many were accepted). Untick
+it to bring it back.
+
+Each finding is named by a key: the first 16 hex digits of a SHA-256 over
+everything that describes it (`bin/keepwell_accept.py`), kept in
+`accepted.json`. When the finding changes, its key does, and it shows
+again as new:
+
+| Check | The key covers |
+| --- | --- |
+| Known vulnerabilities | package, severity, fixed version, every CVE id (a new CVE or a released fix brings it back) |
+| Dependency vulnerabilities | scanned folder, project, lockfile, package, version, every advisory id |
+| Secrets in your code | scanned folder, project, file, line, rule, commit |
+| Software outside updates | the program's name and folder, or the AUR package's name |
+| Failed services | the unit, and whether it is yours or the system's |
+
+At most 200 keys are kept per check, the newest. Nothing is sent to the
+tools: arch-audit, osv-scanner and gitleaks still report everything, and
+Keepwell leaves the accepted findings out of what it counts.
 
 ### Unclaimed app folders
 

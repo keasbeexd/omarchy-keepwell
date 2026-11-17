@@ -46,6 +46,7 @@ import keepwell_unclaimed  # noqa: E402
 import keepwell_schedule  # noqa: E402
 import keepwell_caches  # noqa: E402
 import keepwell_ufw  # noqa: E402
+import keepwell_accept  # noqa: E402
 
 START = time.monotonic()
 TOTAL_BUDGET = 25.0          # seconds for the whole run
@@ -326,9 +327,11 @@ def probe_audit(network):
         if len(packages) < 60:
             fixed = parts[3].strip()
             kinds = [k.strip() for k in parts[2].split(",") if re.fullmatch(r"[a-z ]{1,48}", k.strip())]
+            fixed = fixed if re.fullmatch(r"[A-Za-z0-9.:+~_-]{1,64}", fixed) else ""
+            cves = re.findall(r"CVE-\d{4}-\d{4,7}", parts[4])
             packages.append({"name": clean(parts[0], 64), "severity": sev, "kinds": kinds[:4],
-                             "fixed": fixed if re.fullmatch(r"[A-Za-z0-9.:+~_-]{1,64}", fixed) else "",
-                             "cves": len(re.findall(r"CVE-\d{4}-\d{4,7}", parts[4]))})
+                             "fixed": fixed, "cves": len(cves),
+                             "ack": keepwell_accept.audit_key(parts[0], sev, fixed, cves)})
     p.update(ran=True, counts=counts, packages=packages, unparsed=unparsed, at=int(time.time()))
     try:
         keepwell_state.write("audit.json", json.dumps(p, separators=(",", ":")).encode())
@@ -1326,7 +1329,8 @@ def probe_failed():
         for it in items[:30]:
             unit = str((it or {}).get("unit", ""))
             if re.fullmatch(r"[A-Za-z0-9@._:\\-]{1,128}\.(service|socket|path|timer|mount|target|swap|automount|slice|scope)", unit):
-                units.append({"unit": unit, "user": bool(scope), "description": clean(str(it.get("description", "")), 100)})
+                units.append({"unit": unit, "user": bool(scope), "description": clean(str(it.get("description", "")), 100),
+                              "ack": keepwell_accept.failed_key(unit, bool(scope))})
     return {"units": units[:30], "more": more + max(0, len(units) - 30)}
 
 
@@ -1345,6 +1349,14 @@ def _fit(items, budget):
     return out, len(items) - len(out)
 
 
+def _accepted_last(findings, check):
+    """Findings with the accepted ones moved to the end, so when the list
+    has to be cut to fit, what's cut is what you've already seen."""
+    acc = keepwell_accept.accepted(check)
+    return [f for f in findings if not (isinstance(f, dict) and f.get("ack") in acc)] \
+        + [f for f in findings if isinstance(f, dict) and f.get("ack") in acc]
+
+
 def probe_tools():
     p = {"gitleaks": exists("/usr/bin/gitleaks"), "osvScanner": exists("/usr/bin/osv-scanner")}
     if p["gitleaks"]:
@@ -1358,7 +1370,10 @@ def probe_tools():
             last = None
         if last and isinstance(last.get("at"), int):
             if isinstance(last.get("findings"), list):
-                last["findings"], last["truncated"] = _fit(last["findings"], FINDINGS_BUDGET)
+                for f in last["findings"]:
+                    if isinstance(f, dict):
+                        f["ack"] = keepwell_accept.leak_key(last.get("folder", ""), f)
+                last["findings"], last["truncated"] = _fit(_accepted_last(last["findings"], "leaks"), FINDINGS_BUDGET)
             p["leaks"] = last
     if p["osvScanner"]:
         p["osvScanning"] = text(["/usr/bin/systemctl", "--user", "is-active", "keepwell-osv.service"],
@@ -1370,7 +1385,10 @@ def probe_tools():
         except (OSError, ValueError):
             osv = None
         if osv and isinstance(osv.get("at"), int) and isinstance(osv.get("findings"), list):
-            osv["findings"], osv["truncated"] = _fit(osv["findings"][:100], FINDINGS_BUDGET)
+            for f in osv["findings"]:
+                if isinstance(f, dict):
+                    f["ack"] = keepwell_accept.dep_key(osv.get("folder", ""), f)
+            osv["findings"], osv["truncated"] = _fit(_accepted_last(osv["findings"][:100], "deps"), FINDINGS_BUDGET)
             p["osv"] = osv
     return p
 
@@ -1492,10 +1510,13 @@ def probe_outside(network):
             except (OSError, ValueError):
                 pass
     p["notInAur"] = [clean(n, 64) for n in foreign if n in missing][:30]
+    p["notInAurAcks"] = [keepwell_accept.outside_key("aur", n) for n in p["notInAur"]]
     p["inAur"] = [clean(n, 64) for n in foreign if n in checked and n not in missing][:30]
     p["unchecked"] = len([n for n in foreign if n not in checked])
     p["aurAt"] = at
     p["hand"] = _hand_installed()
+    for h in p["hand"]:
+        h["ack"] = keepwell_accept.outside_key("hand", h.get("name", ""), h.get("where", ""))
     p["cargo"] = _cargo_crates()
     p["go"] = [clean(n, 64) for n in _names(os.path.join(HOME, "go/bin"), 30)]
     for tool, dirs in TOOL_DIRS.items():
@@ -1526,7 +1547,8 @@ def main():
                      ("schedule", probe_schedule),
                      ("remote", probe_remote),
                      ("failed", probe_failed),
-                     ("outside", lambda: probe_outside(network))):
+                     ("outside", lambda: probe_outside(network)),
+                     ("accepted", keepwell_accept.load)):
         if remaining() <= 0.5:
             probes[name] = {"skipped": True}
             continue

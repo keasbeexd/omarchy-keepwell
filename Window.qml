@@ -455,6 +455,9 @@ Item {
                   cursorAction: root.actionCursor
                   onActionActivated: function(index) { root.activateAction(index) }
                   onLinkActivated: function(url) { root.actionRequested({ url: url }, root.check.id || "", "") }
+                  onAcceptToggled: function(checkId, key, on) {
+                    root.actionRequested({ accept: key, check: checkId, on: on }, root.check.id || "", "")
+                  }
                 }
               }
             }

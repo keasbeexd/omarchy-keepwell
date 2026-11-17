@@ -241,6 +241,7 @@ Scope {
       return
     }
     if (action.trashSet) { openTrash(action.trashSet, action.label, context); return }
+    if (typeof action.accept === "string") { acceptFinding(action.check, action.accept, action.on === true); return }
     if (action.unignore === "unclaimed") {
       startJob(["unclaimed", "unignore"], "Ignored folders will be suggested again.")
       return
@@ -250,6 +251,34 @@ Scope {
       return
     }
     say("“" + action.label + "” arrives in the next build.")
+  }
+
+  // Accept a finding or stop accepting it (bin/keepwell_accept.py). The
+  // window shows the change at once; the next check confirms it from disk.
+  readonly property var acceptChecks: ["audit", "deps", "leaks", "outside", "failed"]
+  function acceptFinding(checkId, key, on) {
+    if (acceptChecks.indexOf(checkId) === -1 || !/^[0-9a-f]{16}$/.test(key) || !doc || !doc.probes) return
+    if (acceptWriter.running) { say("Saving the last change — try again in a moment."); return }
+    var acc = {}
+    var old = doc.probes.accepted && typeof doc.probes.accepted === "object" ? doc.probes.accepted : {}
+    for (var c in old) acc[c] = Array.isArray(old[c]) ? old[c].slice() : []
+    var keys = (acc[checkId] || []).filter(function(k) { return k !== key })
+    if (on) keys.push(key)
+    acc[checkId] = keys
+    var probes = Object.assign({}, doc.probes, { accepted: acc })
+    doc = Object.assign({}, doc, { probes: probes })
+    acceptWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "accept", checkId, key, on ? "on" : "off"]))
+  }
+  BoundedProcess {
+    id: acceptWriter
+    maxBytes: 1024
+    timeoutMs: 10000
+    onFinished: function(ok, text) {
+      var saved = false
+      try { saved = ok && JSON.parse(text).saved === true } catch (e) {}
+      if (!saved) root.say("Couldn't save that — Keepwell's state folder may be full or read-only.")
+      root.check(false)
+    }
   }
 
   function launch(desktopId) {

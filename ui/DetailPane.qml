@@ -12,6 +12,8 @@ Rectangle {
 
   signal actionActivated(int index)
   signal linkActivated(string url)
+  // A finding's "Accepted" box: Present.js's fact.ack { check, key, on }.
+  signal acceptToggled(string checkId, string key, bool on)
 
   readonly property string kind: check.kind || "off"
   readonly property var actions: check.actions || []
@@ -148,11 +150,16 @@ Rectangle {
           // Label column, then the value and its owner stacked: in a narrow
           // pane a long value wraps instead of losing its end.
           delegate: Item {
+            id: row
             required property var modelData
+            readonly property var ack: modelData.ack || null
+            // An accepted finding stays readable, just quieter.
+            readonly property bool accepted: !!ack && ack.on === true
             width: parent.width
-            height: Math.max(k.implicitHeight, valueCol.implicitHeight) + Tokens.sp(16)
+            height: Math.max(k.implicitHeight, valueCol.implicitHeight, ackBox.visible ? ackBox.implicitHeight : 0) + Tokens.sp(16)
             KText {
               id: k
+              opacity: row.accepted ? 0.5 : 1
               anchors.left: parent.left
               anchors.top: parent.top
               anchors.topMargin: Tokens.sp(8)
@@ -164,11 +171,13 @@ Rectangle {
             Column {
               id: valueCol
               anchors.left: k.right
-              anchors.right: parent.right
+              anchors.right: ackBox.visible ? ackBox.left : parent.right
               anchors.leftMargin: Tokens.sp(12)
+              anchors.rightMargin: ackBox.visible ? Tokens.sp(12) : 0
               anchors.top: parent.top
               anchors.topMargin: Tokens.sp(8)
               spacing: Tokens.sp(1)
+              opacity: row.accepted ? 0.5 : 1
               KText {
                 width: parent.width
                 text: modelData.v
@@ -197,6 +206,17 @@ Rectangle {
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: root.linkActivated(modelData.url)
+            }
+            // Above the row's link area, so ticking it never opens the link.
+            CheckBox {
+              id: ackBox
+              visible: !!row.ack
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.topMargin: Tokens.sp(8)
+              label: "Accepted"
+              checked: row.accepted
+              onToggled: root.acceptToggled(row.ack.check, row.ack.key, !row.accepted)
             }
           }
         }
