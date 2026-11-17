@@ -17,7 +17,7 @@ service = (root / "Service.qml").read_text()
 signals = re.findall(r"(?m)^  signal (\w+)\(", window)
 properties = re.findall(r"(?m)^  property (?:bool|int|string|var|real) (\w+)", window)
 # Properties the window keeps for itself, not set by the service.
-own = {"sectionIndex", "selection", "actionCursor", "ackCursor", "notice", "openedOn"}
+own = {"sectionIndex", "selection", "actionCursor", "notice", "openedOn"}
 
 missing = [f"signal {s}" for s in signals if f"item.{s}.connect(" not in service]
 missing += [f"property {p}" for p in properties

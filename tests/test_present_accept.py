@@ -1,7 +1,8 @@
 """What the window shows for accepted findings (model/Present.js): greyed
-rows with a ticked box, left out of the check's state and status, so a
+rows marked "accepted by you", left out of the check's state and status, so a
 check whose every finding is accepted can't raise the shield or a
-notification. Runs Present.js under node.
+notification; and the "Review and accept…" action on every check with
+findings that can be accepted. Runs Present.js under node.
 
 Run: python3 tests/test_present_accept.py
 """
@@ -67,13 +68,28 @@ for name, call, accepted, *_ in CASES:
     script += ("ACC = %s; (function() { var r = %s; out.push([r.kind, r.status, (r.facts || [])"
                ".filter(function(f) { return f.ack && f.ack.on }).length, (r.facts || []).filter(function(f) { return f.ack }).length]) })();\n"
                % (json.dumps(accepted), call))
+# build(): the sheet's action on a check with findings, never on one without.
+DOC = {"v": 1, "at": NOW, "network": True, "probes": {"audit": AUDIT, "failed": {"units": [], "more": 0},
+                                                      "accepted": {"audit": [A]}}}
+script += """
+var built = build(%s, %d), acts = {};
+built.forEach(function(sec) { sec.checks.forEach(function(c) {
+  acts[c.id] = (c.actions || []).filter(function(a) { return a.acceptSet === true }).length }) });
+var auditCheck = built[1].checks.filter(function(c) { return c.id === "audit" })[0];
+var subs = auditCheck.facts.filter(function(f) { return f.ack }).map(function(f) { return f.ack.sub });
+out.push(["build", acts.audit, acts.failed, acts.fw, subs]);
+""" % (json.dumps(DOC), NOW)
 script += "console.log(JSON.stringify(out));\n"
 proc = subprocess.run([node, "-"], input=script.encode(), capture_output=True, timeout=30)
 if proc.returncode != 0:
     print(proc.stderr.decode())
     sys.exit(1)
 bad = []
-for (name, _, _, kind, words, ticked), (got_kind, got_status, got_ticked, boxes) in zip(CASES, json.loads(proc.stdout)):
+results = json.loads(proc.stdout)
+built = results.pop()
+if built[1:4] != [1, 0, 0] or any("accepted by you" in s for s in built[4]) or not built[4][0]:
+    bad.append("build: Review and accept on audit/failed/fw = %r, sheet sub-lines %r" % (built[1:4], built[4]))
+for (name, _, _, kind, words, ticked), (got_kind, got_status, got_ticked, boxes) in zip(CASES, results):
     if got_kind != kind or words.lower() not in got_status.lower() or got_ticked != ticked or not boxes:
         bad.append("%s: %s %r, %d ticked of %d" % (name, got_kind, got_status, got_ticked, boxes))
 if bad:

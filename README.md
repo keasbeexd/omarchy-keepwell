@@ -37,7 +37,7 @@ can't open on Wayland. The full design is in
   packages and journals through `paccache`, `pacman` and `journalctl`.
 - **Firewall rules in the window**: allow a port or remove rules from the
   Firewall check, with the same confirm step and visible terminal.
-- **Accept what you've weighed**: tick Accepted on a known vulnerability,
+- **Accept what you've weighed**: review and accept a known vulnerability,
   a vulnerable dependency, a possible secret, a program outside updates or
   a service you expect to fail. It stays listed, greyed out, and stops
   raising the check or sending notifications until it changes.
@@ -86,8 +86,6 @@ theme.
 |---------------|-------------------------------|
 | ↑ ↓ / j k     | move through checks           |
 | ← → / h l     | move through a check's actions|
-| Shift+↑ ↓ / Shift+J K | move through a check's findings that have an Accepted box |
-| Space         | tick or untick Accepted on the selected finding (Enter does too) |
 | Tab / Shift+Tab | next / previous section     |
 | Enter         | run the selected (or primary) action |
 | R / F5        | Refresh: run every quick check again now |
@@ -406,11 +404,12 @@ result is never announced as this one's.
 
 Some findings are known and deliberate: a package you hold back, a test
 key gitleaks flags, a library with no fix that your project needs, a
-program you build yourself, a service your hardware has no use for. Tick
-**Accepted** on that row in Known vulnerabilities, Dependency
-vulnerabilities, Secrets in your code, Software outside updates or Failed
-services (from the keyboard: Shift+↑↓ or Shift+J/K to pick the finding,
-Space to tick it). The row stays in the list, greyed out and marked "accepted by
+program you build yourself, a service your hardware has no use for. In
+Known vulnerabilities, Dependency vulnerabilities, Secrets in your code,
+Software outside updates or Failed services, **Review and accept…** opens
+a sheet listing the check's findings, the accepted ones ticked: tick or
+untick, then Save (↑↓ and Space or Enter from the keyboard, Ctrl+A for
+all). An accepted finding stays in the check's list, greyed out and marked "accepted by
 you", but it no longer counts toward the check's state, the shield, the
 hourly notification, or the notification and deep-scan summary at the end
 of a secrets or dependency scan (which say how many were accepted). Untick
