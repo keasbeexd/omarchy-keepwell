@@ -82,15 +82,25 @@ def accepted(check):
     return set(load().get(check, []))
 
 
-def mark(check, key, on):
-    """Accept (on) or stop accepting one finding. False for an unknown check
-    or a malformed key."""
-    if check not in CHECKS or not isinstance(key, str) or not KEY.fullmatch(key):
+def apply(check, changes):
+    """Apply changes, each "+<key>" (accept) or "-<key>" (stop accepting),
+    in one write. False, and nothing written, for an unknown check, a
+    malformed change or more than LIMIT of them."""
+    if check not in CHECKS or not isinstance(changes, list) or not 0 < len(changes) <= LIMIT:
+        return False
+    if not all(isinstance(c, str) and c[:1] in ("+", "-") and KEY.fullmatch(c[1:]) for c in changes):
         return False
     doc = load()
-    keys = [k for k in doc[check] if k != key]
-    if on:
-        keys.append(key)
+    keys = doc[check]
+    for c in changes:
+        keys = [k for k in keys if k != c[1:]]
+        if c[0] == "+":
+            keys.append(c[1:])
     doc[check] = keys[-LIMIT:]
     keepwell_state.write(FILE, json.dumps({"accepted": doc}, separators=(",", ":")).encode())
     return True
+
+
+def mark(check, key, on):
+    """Accept (on) or stop accepting one finding."""
+    return apply(check, [("+" if on else "-") + str(key)])

@@ -22,8 +22,10 @@
     keepwell-run unclaimed days <n> | ignore <id>... | unignore
                                               the unclaimed finder's settings
     keepwell-run virus allow <id> | forget    mark a flagged file as not a threat; undo all
-    keepwell-run accept <check> <key> on|off  accept a finding (audit, deps, leaks, outside,
-                                              failed): shown greyed, never notified
+    keepwell-run accept <check> +<key>|-<key>...
+                                              accept findings (+) or stop accepting them (-)
+                                              for audit, deps, leaks, outside or failed:
+                                              shown greyed, never notified
     keepwell-run scan  downloads|home         start a ClamAV scan in the background
     keepwell-run leaks <folder>               start a gitleaks scan in the background
     keepwell-run osv <folder>                 start an osv-scanner scan in the background
@@ -2166,9 +2168,9 @@ def main():
             return 2
         sys.stdout.write(json.dumps({"saved": True}))
         return 0
-    if len(args) == 4 and args[0] == "accept" and args[3] in ("on", "off"):
+    if len(args) >= 3 and args[0] == "accept":
         try:
-            saved = keepwell_accept.mark(args[1], args[2], args[3] == "on")
+            saved = keepwell_accept.apply(args[1], args[2:])
         except (OSError, ValueError):
             saved = False
         sys.stdout.write(json.dumps({"saved": saved}))

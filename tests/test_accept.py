@@ -79,12 +79,21 @@ if any(acc.load().values()):
     bad.append("unreadable store taken as accepted")
 
 # The runner's command.
-rc, out = main("accept", "deps", d, "on")
+rc, out = main("accept", "deps", "+" + d)
 if rc != 0 or json.loads(out) != {"saved": True} or d not in acc.accepted("deps"):
     bad.append("accept command: %r %r" % (rc, out))
-rc, out = main("accept", "deps", "../../etc", "on")
+rc, out = main("accept", "deps", "+../../etc")
 if rc == 0 or json.loads(out) != {"saved": False}:
     bad.append("accept command took a bad key: %r %r" % (rc, out))
+# A batch with one bad change writes nothing.
+rc, out = main("accept", "deps", "-" + d, "+zz")
+if rc == 0 or d not in acc.accepted("deps"):
+    bad.append("a batch with a bad change was partly applied: %r %r" % (rc, out))
+other_key = acc.dep_key("~", dict(DEP, package="x"))
+rc, out = main("accept", "deps", "+" + other_key, "-" + d)
+if rc != 0 or other_key not in acc.accepted("deps") or d in acc.accepted("deps"):
+    bad.append("batch accept and un-accept: %r" % acc.accepted("deps"))
+main("accept", "deps", "+" + d, "-" + other_key)
 
 # Notifications: the accepted finding is left out and counted as accepted.
 since = int(time.time())

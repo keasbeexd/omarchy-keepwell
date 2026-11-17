@@ -93,19 +93,22 @@ function check(base, fields) {
 function install(label, act) { return { label: label, primary: true, elevated: true, act: act } }
 
 // ---------------------------------------------------------------- accepted
-// Findings you've looked at and decided to keep (bin/keepwell_accept.py).
-// They stay in the list, greyed out with a ticked "Accepted" box, but leave
-// the check's state, the shield and notifications. A finding's key changes
+// Findings you've looked at and decided to keep (bin/keepwell_accept.py),
+// chosen in the Accept sheet ("Review and accept…", added by build() to any
+// check with a finding that has an ack). They stay in the list, greyed out
+// and marked "accepted by you", but leave the check's state, the shield and
+// notifications. A finding's key changes
 // when the finding does (a new CVE, a new fixed version), so a change brings
 // it back. ACC is set by build() from the "accepted" probe.
 var ACC = {}
 function isAccepted(check, key) {
   return typeof key === "string" && Array.isArray(ACC[check]) && ACC[check].indexOf(key) !== -1
 }
-// fact f, with the box to accept it: f.ack = { check, key, on }.
+// fact f, marked as a finding the Accept sheet can list:
+// f.ack = { check, key, on, sub } (sub: its owner line, for the sheet).
 function acceptable(f, check, key) {
   if (typeof key !== "string" || !/^[0-9a-f]{16}$/.test(key)) return f
-  f.ack = { check: check, key: key, on: isAccepted(check, key) }
+  f.ack = { check: check, key: key, on: isAccepted(check, key), sub: f.owner || "" }
   if (f.ack.on) f.owner = (f.owner ? f.owner + " · " : "") + "accepted by you"
   return f
 }
@@ -115,7 +118,8 @@ function openFirst(list, check, keyOf) {
     .concat(list.filter(function(x) { return isAccepted(check, keyOf(x)) }))
 }
 function acceptedMeta(n) { return n ? " · " + n + " accepted" : "" }
-var ACCEPT_NOTE = "Tick Accepted on a finding you've looked at and decided to live with: it stays here, greyed out, and no longer raises this check or sends a notification. If it changes, it comes back."
+var ACCEPT_NOTE = "Review and accept marks findings you've looked at and decided to live with: they stay here, greyed out, and no longer raise this check or send a notification. If one changes, it comes back."
+var ACCEPT_ACTION = { label: "Review and accept…", acceptSet: true }
 
 // ---------------------------------------------------------------- catalog
 
@@ -907,7 +911,7 @@ function failed(p) {
     meta: [[units.filter(function(u) { return !u.user }).length, "system"], [units.filter(function(u) { return u.user }).length, "yours"]]
       .filter(function(x) { return x[0] }).map(function(x) { return x[0] + " " + x[1] }).join(" · ") + acceptedMeta(accepted),
     facts: all.map(function(u) { return acceptable(fact(u.user ? "Yours" : "System", u.description || u.unit, u.unit), "failed", u.ack) }),
-    note: "Clearing the list forgets these failures; nothing is restarted. A service that fails again shows up again. Tick Accepted on one you expect to fail (a feature your hardware doesn't have): it stays greyed out and isn't counted.",
+    note: "Clearing the list forgets these failures; nothing is restarted. A service that fails again shows up again. Review and accept the ones you expect to fail (a feature your hardware doesn't have): they stay greyed out and aren't counted.",
     actions: [{ label: "Show details", primary: true, act: "failed-details" },
       { label: "Clear the list…", elevated: all.some(function(u) { return !u.user }), act: "failed-reset" }] })
 }
@@ -931,6 +935,13 @@ function hero(section, checks) {
     "Nothing needs your attention." + (off ? " " + word(off) + (off === 1 ? " optional check is" : " optional checks are") + " off." : "")]
 
   return hero
+}
+
+// Any check listing a finding that can be accepted offers the Accept sheet.
+function withAccept(c) {
+  if ((c.facts || []).some(function(f) { return f.ack }))
+    c.actions = (c.actions || []).concat([ACCEPT_ACTION])
+  return c
 }
 
 function build(doc, now) {
@@ -972,7 +983,7 @@ function build(doc, now) {
         // A check that couldn't run is something to look at, never an
         // optional check that is merely off: "looks good" must not hide it.
         return check(CATALOG[id], { kind: "attn", status: "Couldn't check this time", meta: "Try Refresh" })
-      try { return makers[id]() } catch (e) { return check(CATALOG[id], { kind: "attn", status: "Couldn't check this time", meta: "Try Refresh" }) }
+      try { return withAccept(makers[id]()) } catch (e) { return check(CATALOG[id], { kind: "attn", status: "Couldn't check this time", meta: "Try Refresh" }) }
     })
     out.push({ id: s.id, name: s.name, checks: checks, hero: probes ? hero(s, checks) : {
       crit: ["", ""], attn: ["", ""], good: ["Checking…", "Reading your system's state. Nothing is changed."] } })

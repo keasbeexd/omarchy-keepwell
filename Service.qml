@@ -241,7 +241,7 @@ Scope {
       return
     }
     if (action.trashSet) { openTrash(action.trashSet, action.label, context); return }
-    if (typeof action.accept === "string") { acceptFinding(action.check, action.accept, action.on === true); return }
+    if (action.acceptSet === true) { openAccept(checkId, context); return }
     if (action.unignore === "unclaimed") {
       startJob(["unclaimed", "unignore"], "Ignored folders will be suggested again.")
       return
@@ -253,22 +253,66 @@ Scope {
     say("“" + action.label + "” arrives in the next build.")
   }
 
-  // Accept a finding or stop accepting it (bin/keepwell_accept.py). The
-  // window shows the change at once; the next check confirms it from disk.
+  // The Accept sheet: which of a check's findings you accept
+  // (bin/keepwell_accept.py). The rows are the check's own facts that carry
+  // an ack; Save sends only the ticks that changed. The window shows the
+  // change at once; the next check confirms it from disk.
   readonly property var acceptChecks: ["audit", "deps", "leaks", "outside", "failed"]
-  function acceptFinding(checkId, key, on) {
-    if (acceptChecks.indexOf(checkId) === -1 || !/^[0-9a-f]{16}$/.test(key) || !doc || !doc.probes) return
-    if (acceptWriter.running) { say("Saving the last change — try again in a moment."); return }
+  property bool acceptOpen: false
+  property string acceptCheckId: ""
+  property string acceptTitle: ""
+  property string acceptContext: ""
+  property var acceptItems: []
+  property var acceptChecked: ({})
+  function openAccept(checkId, context) {
+    var c = findCheck(checkId)
+    if (acceptChecks.indexOf(checkId) === -1 || !c || acceptWriter.running) return
+    var items = (c.facts || []).filter(function(f) { return f.ack && /^[0-9a-f]{16}$/.test(f.ack.key) })
+      .slice(0, 200).map(function(f) {
+        return { key: f.ack.key, label: f.k, detail: f.v, sub: f.ack.sub || "", on: f.ack.on === true }
+      })
+    var ticked = {}
+    items.forEach(function(i) { if (i.on) ticked[i.key] = true })
+    acceptCheckId = checkId
+    acceptTitle = "Accept findings: " + c.title
+    acceptContext = context
+    acceptItems = items
+    acceptChecked = ticked
+    acceptOpen = true
+  }
+  function toggleAcceptItem(key) {
+    var next = {}
+    for (var k in acceptChecked) next[k] = acceptChecked[k]
+    if (next[key]) delete next[key]
+    else next[key] = true
+    acceptChecked = next
+  }
+  function toggleAllAccept() {
+    var all = acceptItems.length > 0 && acceptItems.every(function(i) { return root.acceptChecked[i.key] === true })
+    var next = {}
+    if (!all) acceptItems.forEach(function(i) { next[i.key] = true })
+    acceptChecked = next
+  }
+  function cancelAccept() { if (!acceptWriter.running) acceptOpen = false }
+  function saveAccept() {
+    if (acceptWriter.running || !doc || !doc.probes) return
+    var changes = acceptItems.filter(function(i) { return (root.acceptChecked[i.key] === true) !== i.on })
+      .map(function(i) { return (root.acceptChecked[i.key] === true ? "+" : "-") + i.key })
+    if (!changes.length) { acceptOpen = false; return }
     var acc = {}
     var old = doc.probes.accepted && typeof doc.probes.accepted === "object" ? doc.probes.accepted : {}
     for (var c in old) acc[c] = Array.isArray(old[c]) ? old[c].slice() : []
-    var keys = (acc[checkId] || []).filter(function(k) { return k !== key })
-    if (on) keys.push(key)
-    acc[checkId] = keys
-    var probes = Object.assign({}, doc.probes, { accepted: acc })
-    doc = Object.assign({}, doc, { probes: probes })
-    acceptWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "accept", checkId, key, on ? "on" : "off"]))
+    var keys = acc[acceptCheckId] || []
+    changes.forEach(function(ch) {
+      keys = keys.filter(function(k) { return k !== ch.slice(1) })
+      if (ch[0] === "+") keys.push(ch.slice(1))
+    })
+    acc[acceptCheckId] = keys
+    acceptPending = { accepted: acc, on: changes.filter(function(ch) { return ch[0] === "+" }).length,
+                      off: changes.filter(function(ch) { return ch[0] === "-" }).length }
+    acceptWriter.start(python.concat([sourceDir + "/bin/keepwell-run", "accept", acceptCheckId], changes))
   }
+  property var acceptPending: null
   BoundedProcess {
     id: acceptWriter
     maxBytes: 1024
@@ -276,7 +320,17 @@ Scope {
     onFinished: function(ok, text) {
       var saved = false
       try { saved = ok && JSON.parse(text).saved === true } catch (e) {}
-      if (!saved) root.say("Couldn't save that — Keepwell's state folder may be full or read-only.")
+      var p = root.acceptPending
+      root.acceptPending = null
+      root.acceptOpen = false
+      if (!saved || !p) {
+        root.say("Couldn't save that — Keepwell's state folder may be full or read-only. Nothing changed.")
+      } else {
+        if (root.doc && root.doc.probes)
+          root.doc = Object.assign({}, root.doc, { probes: Object.assign({}, root.doc.probes, { accepted: p.accepted }) })
+        root.say([p.on ? "Accepted " + p.on : "", p.off ? (p.on ? "back on the list: " : "Back on the list: ") + p.off : ""]
+          .filter(function(x) { return x }).join(" · ") + ".")
+      }
       root.check(false)
     }
   }
@@ -948,6 +1002,16 @@ Scope {
       item.trashDaysChosen.connect(root.chooseDays)
       item.trashIgnored.connect(root.ignoreItem)
       item.trashAccepted.connect(root.confirmTrash)
+      item.acceptOpen = Qt.binding(function() { return root.acceptOpen })
+      item.acceptTitle = Qt.binding(function() { return root.acceptTitle })
+      item.acceptContext = Qt.binding(function() { return root.acceptContext })
+      item.acceptItems = Qt.binding(function() { return root.acceptItems })
+      item.acceptChecked = Qt.binding(function() { return root.acceptChecked })
+      item.acceptBusy = Qt.binding(function() { return acceptWriter.running })
+      item.acceptToggled.connect(root.toggleAcceptItem)
+      item.acceptAllToggled.connect(root.toggleAllAccept)
+      item.acceptSaved.connect(root.saveAccept)
+      item.acceptCanceled.connect(root.cancelAccept)
       item.trashCanceled.connect(root.cancelTrash)
 
       item.schedules = Qt.binding(function() { return root.schedules })

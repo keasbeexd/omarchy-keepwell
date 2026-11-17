@@ -10,4 +10,5 @@ ScrollHint 1.0 ScrollHint.qml
 CheckBox 1.0 CheckBox.qml
 ConfirmSheet 1.0 ConfirmSheet.qml
 TrashSheet 1.0 TrashSheet.qml
+AcceptSheet 1.0 AcceptSheet.qml
 ScheduleSheet 1.0 ScheduleSheet.qml
