@@ -291,7 +291,7 @@ ACTIONS = {
         system=False, options=lambda: _privacy_options(), steps=lambda o: _privacy_steps(o)),
     "chromium-policy": dict(
         title="Apply Chromium privacy policy",
-        summary="Installs a policy file Chromium reads at start: 14 settings that cut what it sends, none of which lowers security. Casting from Chromium stops working.",
+        summary="Installs a policy file Chromium reads at start: 13 settings that cut what it sends, none of which lowers security (Safe Browsing, leaked-password warnings and updates are left alone). Casting from Chromium stops working.",
         system=False, steps=lambda o: _policy_on()),
     "chromium-policy-off": dict(
         title="Remove Chromium privacy policy",
@@ -445,7 +445,7 @@ CHROMIUM_POLICIES = {
     "MetricsReportingEnabled": False, "UrlKeyedAnonymizedDataCollectionEnabled": False,
     "BlockThirdPartyCookies": True, "WebRtcIPHandling": "default_public_interface_only",
     "PrivacySandboxAdTopicsEnabled": False, "PrivacySandboxSiteEnabledAdsEnabled": False,
-    "PrivacySandboxAdMeasurementEnabled": False, "PasswordLeakDetectionEnabled": False,
+    "PrivacySandboxAdMeasurementEnabled": False,
     "BackgroundModeEnabled": False, "EnableMediaRouter": False,
 }
 

@@ -690,14 +690,16 @@ TELEMETRY_HOSTS = (
 )
 
 # Chromium policies that lower what the browser sends, none of which lowers
-# security (Safe Browsing and updates are left alone). Same source as above.
+# security: Safe Browsing, leaked-password warnings (PasswordLeakDetection)
+# and updates are left alone. Must equal bin/keepwell-run's copy
+# (tests/test_chromium_policy.py checks both).
 CHROMIUM_POLICIES = {
     "SearchSuggestEnabled": False, "NetworkPredictionOptions": 2,
     "AlternateErrorPagesEnabled": False, "SpellCheckServiceEnabled": False,
     "MetricsReportingEnabled": False, "UrlKeyedAnonymizedDataCollectionEnabled": False,
     "BlockThirdPartyCookies": True, "WebRtcIPHandling": "default_public_interface_only",
     "PrivacySandboxAdTopicsEnabled": False, "PrivacySandboxSiteEnabledAdsEnabled": False,
-    "PrivacySandboxAdMeasurementEnabled": False, "PasswordLeakDetectionEnabled": False,
+    "PrivacySandboxAdMeasurementEnabled": False,
     "BackgroundModeEnabled": False, "EnableMediaRouter": False,
 }
 
@@ -795,10 +797,15 @@ def probe_network_privacy():
     return p
 
 
-def probe_chromium_policy():
+# Protections an older Keepwell policy may have switched off, with the
+# value that leaves them on.
+SECURITY_DEFAULTS = {"PasswordLeakDetectionEnabled": True}
+
+
+def probe_chromium_policy(base="/etc/chromium/policies/managed"):
     """Which of the privacy policies are in force from managed policy files."""
-    base = "/etc/chromium/policies/managed"
     merged, black_ops, keepwell, files = {}, False, False, 0
+    outdated, lowers = False, False
     try:
         with os.scandir(base) as it:
             names = sorted(e.name for n, e in enumerate(it) if n < 50 and e.name.endswith(".json"))
@@ -816,11 +823,18 @@ def probe_chromium_policy():
             files += 1
             black_ops = black_ops or name == "black-ops.json"
             keepwell = keepwell or name == "keepwell-privacy.json"
+            if name == "keepwell-privacy.json" and doc != CHROMIUM_POLICIES:
+                # Written by an older Keepwell (1.2.12 and before also turned
+                # off leaked-password warnings): offer to write it again.
+                outdated = True
+                lowers = lowers or any(doc.get(k) is not None and doc.get(k) != v
+                                       for k, v in SECURITY_DEFAULTS.items())
             for k, want in CHROMIUM_POLICIES.items():
                 if k in doc:
                     merged[k] = doc[k] == want
     return {"set": sum(1 for v in merged.values() if v), "total": len(CHROMIUM_POLICIES),
-            "files": files, "blackOps": black_ops, "keepwell": keepwell}
+            "files": files, "blackOps": black_ops, "keepwell": keepwell,
+            "outdated": outdated, "lowersSecurity": lowers}
 
 
 def probe_schedule():
