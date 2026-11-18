@@ -303,8 +303,13 @@ by hand some other way, is not offered.
 | Send Do Not Track | `~/.config/uwsm/env.d/90-keepwell-do-not-track` (`export DO_NOT_TRACK=1`) | `systemctl --user set-environment DO_NOT_TRACK=1` |
 
 **Browser telemetry → Apply privacy policy** installs
-`/etc/chromium/policies/managed/keepwell-privacy.json` with the 14 policies
-(it is shown in full first); **Remove privacy policy** deletes it.
+`/etc/chromium/policies/managed/keepwell-privacy.json` with 13 policies
+(it is shown in full first); **Remove privacy policy** deletes it. They cut
+what Chromium sends and leave Safe Browsing, leaked-password warnings and
+updates alone. Keepwell 1.2.12 and earlier also set
+`PasswordLeakDetectionEnabled` to false; if that older file is found, the
+check says so and offers **Update privacy policy**, which writes the
+current one.
 
 Files under `/etc` are written with `sudo install … /dev/stdin <path>`, so
 their contents go through standard input, never the command line, and are

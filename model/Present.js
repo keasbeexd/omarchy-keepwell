@@ -142,7 +142,7 @@ var CATALOG = {
     what: "An SSH server lets people log in to this computer over the network. Omarchy leaves it off. If you use it, keys are much safer than passwords, which can be guessed." },
 
   browser: { id: "browser", title: "Browser telemetry", tool: "Chromium",
-    what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting, and can install a privacy policy that turns off 14 of them (casting from Chromium stops working). Removing the policy gives you your own settings back." },
+    what: "Chromium can send usage statistics and crash reports. Keepwell shows each setting, and can install a privacy policy that turns them off without touching Safe Browsing or leaked-password warnings (casting from Chromium stops working). Removing the policy gives you your own settings back." },
   netpriv: { id: "netpriv", title: "Network privacy", tool: "hosts · resolved · NetworkManager",
     what: "Small, optional settings that cut what this computer tells the network: telemetry hosts, backup DNS servers, Arch's connection check, your hardware address, local announcements and debug lookups. Each has a small cost, shown before anything changes." },
   apps: { id: "apps", title: "Data from your apps", tool: "Reporter",
@@ -607,9 +607,18 @@ function browser(p, policy) {
   var policyFact = fact("Privacy policy",
     !policy.set ? "Not installed" : locked ? "All " + policy.total + " in force" : policy.set + " of " + policy.total + " in force",
     policy.blackOps ? BLACK_OPS : policy.keepwell ? "set by Keepwell" : "system-wide policy")
+  // A policy file from an older Keepwell: written again with the current set.
+  var update = { label: "Update privacy policy…", primary: true, elevated: true, act: "chromium-policy" }
   var actions = policy.blackOps ? []
+    : policy.keepwell && policy.outdated ? [update, { label: "Remove privacy policy…", elevated: true, act: "chromium-policy-off" }]
     : policy.keepwell ? [{ label: "Remove privacy policy…", elevated: true, act: "chromium-policy-off" }]
     : locked ? [] : [{ label: "Apply privacy policy…", primary: true, elevated: true, act: "chromium-policy" }]
+  if (policy.keepwell && policy.outdated && !policy.blackOps) return check(b, { kind: "attn",
+    status: policy.lowersSecurity ? "Keepwell's older privacy policy turns off leaked-password warnings"
+      : "Keepwell's privacy policy is out of date",
+    meta: "Update it to the current settings", facts: [policyFact],
+    note: "An earlier Keepwell's policy also stopped Chromium from warning you when a password you type has appeared in a data breach. Updating writes the current policy, which leaves that warning, Safe Browsing and updates alone.",
+    actions: actions })
   if (!p.profile) return check(b, { kind: locked ? "good" : "off", status: "No Chromium profile yet",
     meta: "Open Chromium once, then check again", facts: [policyFact], actions: actions })
   var explicitOn = p.metrics === true || p.safeBrowsingReports === true
@@ -627,7 +636,7 @@ function browser(p, policy) {
       policyFact
     ],
     note: locked ? "A policy overrides the profile settings above, whatever they say."
-      : "The privacy policy is the sturdy route: Chromium can't overwrite it, and it covers 14 settings at once without touching your profile."
+      : "The privacy policy is the sturdy route: Chromium can't overwrite it, and it covers " + (policy.total || "its") + " settings at once without touching your profile."
         + (p.running ? " It applies the next time Chromium starts." : ""),
     actions: actions
   })
