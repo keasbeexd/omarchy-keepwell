@@ -142,7 +142,7 @@ deadline and an output cap; the helper prints one JSON document of at most
 
 | Check | Reads | Runs |
 |---|---|---|
-| Software outside updates | names in `~/.local/bin`, `/usr/local/bin`, `~/bin`, `~/go/bin`, `~/.local/share/pipx/venvs`, `~/.local/share/uv/tools`, and `.AppImage` files in `~/Applications`, `~/AppImages`, `~/Downloads`; the first four bytes of each candidate (is it a compiled program?); `~/.cargo/.crates.toml`; the last AUR answer (`aur.json`) | `pacman -Qmq`, `pacman -Qo` (for candidates outside your home), the AUR request (see Network) |
+| Software outside updates | names in `~/.local/bin`, `/usr/local/bin`, `~/bin`, `~/go/bin`, `~/.local/share/pipx/venvs`, `~/.local/share/uv/tools`, and `.AppImage` files in `~/Applications`, `~/AppImages`, `~/Downloads`; the first four bytes of each candidate (is it a compiled program?); `~/.cargo/.crates.toml`; the last AUR answer (`aur.json`) | `pacman -Qmq`, `pacman -Qo` (for candidates outside your home), the AUR request (see Network). Packages the AUR hasn't been asked about yet (before the first lookup, new since the last, or past the first 100) are listed as not checked, and the check doesn't say omarchy update covers everything until they have been |
 | Firewall | `/etc/ufw/ufw.conf`, `/etc/default/ufw`, `/etc/ufw/user*.rules` | `systemctl is-enabled/is-active ufw` |
 | Remote access | `/etc/ssh/sshd_config` and its `Include`d drop-ins under `/etc/ssh` (port, password and root login settings, parsed the way sshd does: `Keyword value` or `Keyword=value`, quoted arguments, the first value winning; a root-owned symlink into `/etc` or `/usr` is followed, as sshd does) and the options sshd is started with (`-o`, `-p`, `-f`; read as systemd's exact argument list, so `-o "PasswordAuthentication yes"` counts as one option). Each sshd that can be reached is worked out on its own, from its own command line: `sshd.service` when it is enabled or running, and when `sshd.socket` is, the per-connection `sshd@.service` it starts (on the socket's ports), both as a new connection gets it and as each connection unit loaded now (under `sshd@` and every name `sshd@.service` goes by, so an alias of another template is covered), and every other system service an `sshd` process is running from (found through `/proc/<pid>/comm` and `cgroup`; each is resolved, up to 20, and it makes SSH count as on, as does an `sshd` outside any system service), and the most open of them is shown. Ports add up the way sshd does it: every `Port`, or only `-p`'s, and a `ListenAddress` with a port uses only that one. Other sources: `/etc/ufw/user*.rules` (whether the SSH port is allowed); the number of keys in `~/.ssh/authorized_keys`. "Keys only" is shown only when everything sshd reads was accounted for. Any file Keepwell can't read (a `Match` block in it would override the global settings, however early they were set), an `Include` Keepwell doesn't follow, `-f` or a `Match`/`Include` given with `-o`, sshd started through another program, an `sshd.socket` that starts some other service or listens in a way Keepwell doesn't read, systemd settings for single connections (any `sshd@…` entry, or one under an alias's template name, in systemd's unit folders other than the template and its `.d`, since one for a connection not yet started can't be checked), an `sshd` running outside a system service, more than 20 other services running sshd, or a `/proc` that hides other users' processes or lists them without letting them be read (`hidepid=2` or `hidepid=1`; any process listed but not readable counts, only one that ended while being read is skipped) (then SSH units that are off show "SSH looks off; Keepwell couldn't see every running program", not "No remote login running"), an environment variable on its command line (except in the value of a setting Keepwell doesn't report), or a `Match` block (`Match All` included) that allows passwords or changes root login makes it "couldn't confirm keys only". If `systemctl` gives no answer, the check says it couldn't check | `systemctl is-enabled/is-active sshd.service sshd.socket`, `busctl` `LoadUnit` and the `ExecStart` property of `sshd.service` and `sshd@.service`, and `Accept`, `Listen` and `Triggers` of `sshd.socket`, the `Id` and `Names` of `sshd@keepwell-probe.service`, `ListUnitsByPatterns` for each template name, `/proc/<pid>/comm` and `/proc/<pid>/cgroup`, `systemd-analyze unit-paths` |
 | Known vulnerabilities | the last result Keepwell saved (`audit.json`, below) | `arch-audit` (hourly and when you ask — see Network); `busctl get-property … NetworkManager Metered` |
@@ -270,7 +270,7 @@ needs your password use a terminal; the rest run inside Keepwell:
 | Allow a port | `sudo ufw allow <port>/tcp` and/or `sudo ufw allow <port>/udp`. Keepwell accepts digits only, 1 to 65535 |
 | Remove firewall rules | `sudo ufw delete <rule>` for each one ticked, built from the fields in `/etc/ufw/user*.rules`. A rule is listed only if every field matches ufw's own format; app, interface, routed and logged rules are left to `ufw` |
 | Update Flatpak apps | `flatpak update -y --noninteractive` (omarchy update doesn't; no password, Flatpak's own policy allows signed updates) |
-| Turn off SSH | `sudo systemctl disable --now sshd.service` |
+| Turn off SSH | `sudo systemctl disable --now sshd.service` (and `sshd.socket` when it is installed). An sshd started any other way is not touched; the Remote access check lists it under "Also running" and says so |
 | Allow SSH keys only (offered once a key is in `~/.ssh/authorized_keys`) | writes `/etc/ssh/sshd_config.d/10-keepwell-keys-only.conf` (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`), `sudo sshd -t` — if the test fails the file is removed again — then `sudo systemctl try-reload-or-restart sshd.service`. Open sessions stay open |
 | Allow SSH passwords again | removes that file, `sudo systemctl try-reload-or-restart sshd.service` |
 | Show failed services (reads only) | `systemctl [--user] status --no-pager --lines=15 -- <unit>` for each failed unit |
@@ -455,8 +455,9 @@ claims its name** and **nothing in it has changed** for the age you choose
   something installed starts like, counts as claimed — `hypr` by `hyprland`,
   `gtk-3.0` by `gtk3` — so the finder errs towards suggesting too little.
 - A folder too large to look through completely within its budget (600
-  entries, 8,000 overall, 4 seconds) is never suggested, since something
-  inside it may have changed recently.
+  entries, 8,000 overall, 4 seconds), or with anything inside that can't be
+  read (a folder that can't be listed, an entry that can't be looked at),
+  is never suggested, since something inside it may have changed recently.
 - **Review…** lists each folder with its size and how long it has been
   untouched. Tick what to move to the Trash; **Ignore** never suggests a
   folder again (**Stop ignoring** on the check undoes that). A folder is
@@ -495,9 +496,13 @@ systemctl --user enable --now keepwell-deep.timer
 
 The schedule is checked with `systemd-analyze calendar` before anything is
 written. Both files start with a `# Written by the Keepwell plugin` line;
-Keepwell refuses to replace a file of either name that lacks it, and turning
-the schedule off (`systemctl --user disable --now keepwell-deep.timer`)
-deletes only files that have it.
+Keepwell refuses to replace a file of either name that lacks it. Before
+turning the schedule on or off it also asks systemd where it loaded each
+unit from (`systemctl --user show -p FragmentPath`): a `keepwell-deep`
+timer or service from any other file is left alone and the change is
+refused, and only Keepwell's own timer counts as the schedule being on.
+Turning the schedule off (`systemctl --user disable --now
+keepwell-deep.timer`) deletes only files that have the marker.
 
 A run starts the chosen scans one after another as the usual background
 services (so their cards show progress and **Stop scan** works), waits for

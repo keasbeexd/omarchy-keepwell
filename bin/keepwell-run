@@ -304,9 +304,10 @@ ACTIONS = {
             step("Update Flatpak apps and runtimes", ["/usr/bin/flatpak", "update", "-y", "--noninteractive"])]),
     "ssh-off": dict(
         title="Turn off SSH",
-        summary="Stops the SSH server and keeps it from starting with the computer. Nobody can log in to this computer over the network until you turn it on again.",
+        summary="Stops OpenSSH's own units (sshd.service, and sshd.socket where it exists) and keeps them from starting with the computer. An SSH server started any other way is left alone; the Remote access check lists it if one is still running.",
         system=False, steps=lambda o: [
-            step("Stop SSH and don't start it at boot", ["/usr/bin/systemctl", "disable", "--now", "sshd.service"], root=True)]),
+            step("Stop SSH and don't start it at boot", ["/usr/bin/systemctl", "disable", "--now", "--"] + _ssh_units(),
+                 root=True)]),
     "ssh-keys-only": dict(
         title="Allow SSH keys only",
         summary="Makes the SSH server refuse passwords, so only someone with one of your SSH keys can log in. The new setting is tested before SSH reloads, and taken back out if the test fails.",
@@ -448,6 +449,16 @@ CHROMIUM_POLICIES = {
     "PrivacySandboxAdMeasurementEnabled": False,
     "BackgroundModeEnabled": False, "EnableMediaRouter": False,
 }
+
+
+def _ssh_units():
+    """OpenSSH's units that exist here: sshd.service, and sshd.socket when it
+    is installed (systemctl disable fails on a unit that isn't)."""
+    loaded = capture(["/usr/bin/systemctl", "show", "-p", "LoadState", "--value", "--", "sshd.socket"],
+                     timeout=3, cap=256).strip()
+    # An answer other than not-found (including none) counts as installed:
+    # a failed disable is shown, a skipped one wouldn't be.
+    return ["sshd.service"] + (["sshd.socket"] if loaded != "not-found" else [])
 
 
 def _active(unit):
@@ -1637,7 +1648,9 @@ def schedule_set(kind, days_arg, at, parts_arg, battery="on"):
     if battery not in ("on", "off"):
         return {"saved": False, "reason": "battery"}
     timer, service = keepwell_schedule.units(kind)
-    if not (keepwell_state.unit_free(service) and keepwell_state.unit_free(timer)):
+    seen = lambda argv: capture(argv, timeout=5, cap=8192)
+    if not (keepwell_state.unit_free(service) and keepwell_state.unit_free(timer)) \
+            or "other" in (keepwell_schedule.loaded_from(timer, seen), keepwell_schedule.loaded_from(service, seen)):
         return {"saved": False, "reason": "exists"}
     me = os.path.realpath(__file__)
     if not re.fullmatch(r"/[A-Za-z0-9/._@+-]+", me):
@@ -1671,8 +1684,15 @@ def schedule_set(kind, days_arg, at, parts_arg, battery="on"):
 
 
 def schedule_off(kind):
+    """Stop and remove Keepwell's own schedule. A timer of that name that
+    systemd loaded from any other file is left alone, running or not."""
     timer, service = keepwell_schedule.units(kind)
-    _user_systemctl("disable", "--now", timer)
+    seen = lambda argv: capture(argv, timeout=5, cap=8192)
+    where = keepwell_schedule.loaded_from(timer, seen)
+    if where == "other":
+        return {"saved": False, "reason": "exists"}
+    if where == "ours":
+        _user_systemctl("disable", "--now", timer)
     keepwell_state.remove_unit(timer)
     keepwell_state.remove_unit(service)
     _user_systemctl("daemon-reload")

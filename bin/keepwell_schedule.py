@@ -15,6 +15,7 @@ Settings live in schedules.json, what happened in runs.json.
 """
 
 import json
+import os
 import re
 import time
 
@@ -30,6 +31,18 @@ TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 
 def units(kind):
     return "keepwell-%s.timer" % kind, "keepwell-%s.service" % kind
+
+
+def loaded_from(unit, capture):
+    """Where systemd loaded this user unit from: "" when it has none, "ours"
+    when it is Keepwell's own file in ~/.config/systemd/user, or "other"
+    (another file of that name, or an answer Keepwell can't read). Keepwell
+    only enables, stops or disables a unit it loaded from its own file."""
+    path = capture(["/usr/bin/systemctl", "--user", "show", "-p", "FragmentPath", "--value", "--", unit]).strip()
+    if not path:
+        return ""
+    mine = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user", unit)
+    return "ours" if path == mine and keepwell_state.unit_ours(unit) else "other"
 
 
 def calendar(conf):
@@ -104,7 +117,9 @@ def status(capture):
     out = {}
     for kind in KINDS:
         timer, service = units(kind)
-        enabled = capture(["/usr/bin/systemctl", "--user", "is-enabled", timer]).strip() == "enabled"
+        # A timer of that name from somewhere else is not this schedule.
+        enabled = capture(["/usr/bin/systemctl", "--user", "is-enabled", timer]).strip() == "enabled" \
+            and loaded_from(timer, capture) == "ours"
         running = capture(["/usr/bin/systemctl", "--user", "is-active", service]).strip() in ("active", "activating") \
             or capture(["/usr/bin/systemctl", "--user", "is-active", "keepwell-%s-now.service" % kind]).strip() in ("active", "activating")
         c = conf[kind]

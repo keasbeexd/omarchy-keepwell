@@ -332,6 +332,26 @@ def unit_free(name):
         os.close(dirfd)
 
 
+def unit_ours(name):
+    """True when Keepwell's unit folder holds this unit and Keepwell wrote it."""
+    if not UNIT_NAME.fullmatch(name):
+        return False
+    dirfd = _unit_dir(False)
+    if dirfd is None:
+        return False
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+        except OSError:
+            return False
+        try:
+            return stat.S_ISREG(os.fstat(fd).st_mode) and os.read(fd, len(UNIT_MARK)).startswith(UNIT_MARK)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
+
+
 def remove_unit(name):
     """Remove one of Keepwell's unit files, only if Keepwell wrote it."""
     if not UNIT_NAME.fullmatch(name):
