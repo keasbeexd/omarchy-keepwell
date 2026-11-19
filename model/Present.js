@@ -389,6 +389,17 @@ function outside(p, perms, now) {
   else if (p.foreign > 0 && !p.aurAt) facts.push(fact("AUR packages", plural(p.foreign, "package", "packages") + " from outside the official repositories", aur))
   var actions = flatpaks ? [{ label: "Update Flatpak apps…", primary: true, act: "flatpak-update" }] : []
   var shadows = hand.filter(function(h) { return h.shadows && !isAccepted("outside", h.ack) })
+  // Packages from outside the official repositories that the AUR hasn't
+  // been asked about yet (before the first lookup, or new since the last)
+  // may not be in it, so "covers everything" waits until they are.
+  var unchecked = typeof p.unchecked === "number" && p.unchecked > 0 ? p.unchecked : 0
+  if (unchecked) facts.push(fact("Not checked yet", plural(unchecked, "package", "packages") + " not yet looked up in the AUR",
+    "Check the AUR asks it · only package names are sent"))
+  var askAur = { label: "Check the AUR", primary: !count && !flatpaks, run: "network" }
+  if (!count && unchecked) return check(b, { kind: "info",
+    status: plural(unchecked, "package hasn't", "packages haven't") + " been checked against the AUR yet",
+    meta: "omarchy update may not cover " + (unchecked === 1 ? "it" : "them") + acceptedMeta(acceptedOut),
+    facts: facts, actions: actions.concat([askAur]), note: acceptedOut ? ACCEPT_NOTE : "" })
   if (!count) return check(b, { kind: acceptedOut ? "info" : "good",
     status: acceptedOut ? "omarchy update covers everything else" : "omarchy update covers everything",
     meta: (inAur.length ? "Includes " + plural(inAur.length, "AUR package", "AUR packages") : "Packages and mise tools") + acceptedMeta(acceptedOut),
@@ -397,11 +408,22 @@ function outside(p, perms, now) {
     status: shadows.length ? shadows[0].name + " in " + shadows[0].where + " hides the packaged one"
       : count === 1 ? "One thing omarchy update misses" : word(count) + " things omarchy update misses",
     meta: facts.slice(0, Math.min(count, 3)).map(function(f) { return f.k }).join(" · ") + acceptedMeta(acceptedOut),
-    facts: facts, actions: actions,
+    facts: facts, actions: unchecked ? actions.concat([askAur]) : actions,
     note: "These don't get security fixes from omarchy update. Update each the way it was installed — or remove what you no longer use. " + ACCEPT_NOTE })
 }
 
+// Turn off SSH stops OpenSSH's own units only; an sshd started another way
+// keeps running, and the check says so rather than implying otherwise.
 function remote(p) {
+  var c = remoteCheck(p)
+  var others = (Array.isArray(p.elsewhere) ? p.elsewhere.length : 0) + (typeof p.elsewhereMore === "number" ? p.elsewhereMore : 0)
+    + (typeof p.outside === "number" ? p.outside : 0)
+  if (others > 0 && (c.actions || []).some(function(a) { return a.act === "ssh-off" }))
+    c.note = (c.note ? c.note + " " : "") + "Turn off SSH stops OpenSSH's own sshd.service and sshd.socket. The sshd under Also running was started another way and keeps running until you stop it where it was started."
+  return c
+}
+
+function remoteCheck(p) {
   var b = CATALOG.remote
   if (!p.installed) return check(b, { kind: "good", status: "No remote login running", meta: "SSH server not installed" })
   // An sshd running from a unit with another name, or outside any system
@@ -614,7 +636,7 @@ function browser(p, policy) {
     : policy.keepwell ? [{ label: "Remove privacy policy…", elevated: true, act: "chromium-policy-off" }]
     : locked ? [] : [{ label: "Apply privacy policy…", primary: true, elevated: true, act: "chromium-policy" }]
   if (policy.keepwell && policy.outdated && !policy.blackOps) return check(b, { kind: "attn",
-    status: policy.lowersSecurity ? "Keepwell's older privacy policy turns off leaked-password warnings"
+    status: policy.lowersSecurity ? "Keepwell's older privacy policy may turn off leaked-password warnings"
       : "Keepwell's privacy policy is out of date",
     meta: "Update it to the current settings", facts: [policyFact],
     note: "An earlier Keepwell's policy also stopped Chromium from warning you when a password you type has appeared in a data breach. Updating writes the current policy, which leaves that warning, Safe Browsing and updates alone.",

@@ -55,6 +55,19 @@ try:
     r = probe({k: v for k, v in list(policies.items())[:-1]})
     if not r["outdated"] or r["lowersSecurity"]:
         bad.append("an incomplete policy: %r" % r)
+    # Found even when the folder holds more files than the scan reads.
+    for i in range(60):
+        with open(os.path.join(d, "a%02d.json" % i), "w") as f:
+            f.write("{}")
+    r = probe(old)
+    if not (r["outdated"] and r["lowersSecurity"]):
+        bad.append("1.2.12's policy missed in a full folder: %r" % r)
+    # A file that can't be parsed may still switch a protection off.
+    with open(os.path.join(d, "keepwell-privacy.json"), "w") as f:
+        f.write("{not json")
+    r = check["probe_chromium_policy"](d)
+    if not (r["keepwell"] and r["outdated"] and r["lowersSecurity"]):
+        bad.append("an unreadable Keepwell policy: %r" % r)
 finally:
     shutil.rmtree(d, ignore_errors=True)
 

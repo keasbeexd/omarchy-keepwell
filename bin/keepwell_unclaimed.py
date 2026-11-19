@@ -243,7 +243,10 @@ def _plain_name(name):
 
 def _look(path, budget, deadline):
     """(newest mtime, bytes, complete) of a folder or file, never following
-    symlinks; incomplete when a budget ran out."""
+    symlinks; incomplete when a budget ran out, or when anything inside
+    couldn't be read (a folder that can't be listed, an entry that can't be
+    stat'ed, one that vanished meanwhile): it may hold something changed
+    recently, so the folder must not be called untouched."""
     st = os.lstat(path)
     newest, total = st.st_mtime, st.st_blocks * 512
     if not stat.S_ISDIR(st.st_mode):
@@ -260,14 +263,14 @@ def _look(path, budget, deadline):
                     try:
                         s = e.stat(follow_symlinks=False)
                     except OSError:
-                        continue
+                        return newest, total, False
                     newest = max(newest, s.st_mtime)
                     if stat.S_ISDIR(s.st_mode):
                         stack.append(e.path)
                     else:
                         total += s.st_blocks * 512
         except OSError:
-            continue
+            return newest, total, False
     return newest, total, True
 
 

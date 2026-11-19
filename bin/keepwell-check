@@ -806,6 +806,25 @@ def probe_chromium_policy(base="/etc/chromium/policies/managed"):
     """Which of the privacy policies are in force from managed policy files."""
     merged, black_ops, keepwell, files = {}, False, False, 0
     outdated, lowers = False, False
+    # Keepwell's own file is read by its fixed name first, whatever the
+    # folder holds, so the capped scan below can't skip an older one. One
+    # that is there but can't be read or parsed counts as outdated: it may
+    # still switch a protection off.
+    own = os.path.join(base, "keepwell-privacy.json")
+    if os.path.lexists(own):
+        keepwell = True
+        raw = read_file(own, 256 * 1024)
+        try:
+            doc = json.loads(raw) if raw is not None else None
+        except ValueError:
+            doc = None
+        if not isinstance(doc, dict):
+            outdated = lowers = True
+        elif doc != CHROMIUM_POLICIES:
+            # Written by an older Keepwell (1.2.12 and before also turned
+            # off leaked-password warnings): offer to write it again.
+            outdated = True
+            lowers = any(doc.get(k) is not None and doc.get(k) != v for k, v in SECURITY_DEFAULTS.items())
     try:
         with os.scandir(base) as it:
             names = sorted(e.name for n, e in enumerate(it) if n < 50 and e.name.endswith(".json"))
@@ -822,13 +841,6 @@ def probe_chromium_policy(base="/etc/chromium/policies/managed"):
         if isinstance(doc, dict):
             files += 1
             black_ops = black_ops or name == "black-ops.json"
-            keepwell = keepwell or name == "keepwell-privacy.json"
-            if name == "keepwell-privacy.json" and doc != CHROMIUM_POLICIES:
-                # Written by an older Keepwell (1.2.12 and before also turned
-                # off leaked-password warnings): offer to write it again.
-                outdated = True
-                lowers = lowers or any(doc.get(k) is not None and doc.get(k) != v
-                                       for k, v in SECURITY_DEFAULTS.items())
             for k, want in CHROMIUM_POLICIES.items():
                 if k in doc:
                     merged[k] = doc[k] == want
@@ -1500,7 +1512,11 @@ def probe_outside(network):
     rc, out = text(["/usr/bin/pacman", "-Qmq"], timeout=5, cap=64 * 1024)
     foreign = [n for n in out.split() if PKG_NAME.fullmatch(n)] if rc in (0, 1) else []
     # makepkg's split -debug packages are never in the AUR on their own.
-    foreign = [n for n in foreign if not (n.endswith("-debug") and n[:-6] in foreign)][:100]
+    foreign = [n for n in foreign if not (n.endswith("-debug") and n[:-6] in foreign)]
+    # At most 100 are asked about; the rest count as not checked, so the
+    # check never says omarchy update covers them.
+    beyond = max(0, len(foreign) - 100)
+    foreign = foreign[:100]
     try:
         cached = keepwell_state.read_json("aur.json") or {}
     except (OSError, ValueError):
@@ -1526,7 +1542,7 @@ def probe_outside(network):
     p["notInAur"] = [clean(n, 64) for n in foreign if n in missing][:30]
     p["notInAurAcks"] = [keepwell_accept.outside_key("aur", n) for n in p["notInAur"]]
     p["inAur"] = [clean(n, 64) for n in foreign if n in checked and n not in missing][:30]
-    p["unchecked"] = len([n for n in foreign if n not in checked])
+    p["unchecked"] = len([n for n in foreign if n not in checked]) + beyond
     p["aurAt"] = at
     p["hand"] = _hand_installed()
     for h in p["hand"]:
