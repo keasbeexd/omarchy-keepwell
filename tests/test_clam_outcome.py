@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import keepwell_av  # noqa: E402
 
+GONE = "Keepwell: %d file(s) were deleted during the scan, %d of them in Downloads\n"
 SUMMARY = """
 ----------- SCAN SUMMARY -----------
 Known viruses: 3628258
@@ -24,8 +25,8 @@ Time: 4.637 sec (0 m 4 s)
 """
 
 
-def log(files=2, infected=0, errors=0, rc=0, odd=0, unread=0, found=""):
-    text = found + SUMMARY % (files, infected, "Total errors: %d\n" % errors if errors else "")
+def log(files=2, infected=0, errors=0, rc=0, odd=0, unread=0, found="", extra=""):
+    text = found + SUMMARY % (files, infected, "Total errors: %d\n" % errors if errors else "") + extra
     if odd:
         text += "Keepwell: %d file(s) with control characters in their names were not scanned\n" % odd
     if unread:
@@ -48,6 +49,21 @@ cases = [
     ("no summary", "Scanning /home/u/a\n", False),
     # A status line before the last summary must not answer for it.
     ("status only before summary", "Keepwell: clamscan exit status 0\n" + log(rc=None), False),
+    # Files deleted while the scan ran, checked again and really gone.
+    ("vanished, exit 2", log(files=30000, rc=2, extra=GONE % (12, 0)), True),
+    ("vanished, infected, exit 1", log(files=30000, infected=1, rc=1, extra=GONE % (12, 0),
+                                       found="/home/u/x.exe: Win.Test FOUND\n"), True),
+    ("vanished in Downloads", log(files=30000, rc=2, extra=GONE % (12, 1)), False),
+    ("vanished, at the limit", log(files=30000, rc=2, extra=GONE % (300, 0)), True),
+    ("vanished, over the limit", log(files=30000, rc=2, extra=GONE % (301, 0)), False),
+    ("vanished, small scan, 100", log(files=10, rc=2, extra=GONE % (100, 0)), True),
+    ("vanished, but another error", log(files=30000, rc=2, extra=GONE % (12, 0)
+                                        + "Keepwell: clamscan reported 1 other error(s)\n"), False),
+    ("vanished, but one not scanned", log(files=30000, rc=2, extra=GONE % (12, 0)
+                                          + "Keepwell: 1 file(s) couldn't be scanned\n"
+                                          + "Keepwell: not scanned: /home/u/f: Not supported file type\n"), False),
+    # Before the summary, such a line answers for nothing.
+    ("vanished line before summary", GONE % (12, 0) + log(files=30000, rc=2), False),
 ]
 
 bad = []
@@ -97,6 +113,14 @@ if os.geteuid() != 0:
             bad.append("a failed write to the file list was swallowed")
         except OSError:
             pass
+
+o = keepwell_av.outcome(log(files=30000, rc=2, extra=GONE % (12, 0) + "Keepwell: 1 file(s) couldn't be scanned\n"
+                                                 + "Keepwell: not scanned: /home/u/f: Not supported file type\n"))
+if o["notScannedItems"] != ["/home/u/f: Not supported file type"] or keepwell_av.incomplete_text(o) != "1 file couldn't be scanned":
+    bad.append("not scanned: %r, %r" % (o["notScannedItems"], keepwell_av.incomplete_text(o)))
+o = keepwell_av.outcome(log(files=30000, rc=2, extra=GONE % (12, 3)))
+if keepwell_av.incomplete_text(o) != "3 files in Downloads deleted or renamed during the scan":
+    bad.append("downloads reason: %r" % keepwell_av.incomplete_text(o))
 
 if bad:
     print("\n".join(bad))

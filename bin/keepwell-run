@@ -72,6 +72,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 
 sys.dont_write_bytecode = True
@@ -1070,9 +1071,11 @@ def _background(unit, kind, argv, quiet=False):
     return {"started": rc == 0}
 
 
-# Caches, the Trash and Keepwell's own logs: rebuilt, already discarded, or
-# written by the scan itself.
-CLAM_SKIP = (".cache", ".local/share/Trash", ".local/state/keepwell")
+# The Trash and Keepwell's own logs: already discarded (nothing in it runs
+# unless it is restored, and a restored file is scanned again), or written
+# by the scan itself. ~/.cache is scanned: tools such as mise and yay keep
+# downloaded programs and build sources there.
+CLAM_SKIP = (".local/share/Trash", ".local/state/keepwell")
 
 
 def start_scan(target, quiet=False):
@@ -1095,7 +1098,20 @@ def _progress(kind, started, done, total):
 CONTROL = re.compile(rb"[\x00-\x1f\x7f]")
 
 
-def _list_files(root, skip, out):
+def odd_name(raw):
+    """A file name with control characters, written so it can be shown:
+    each control byte, backslash and byte that isn't UTF-8 as \\xNN."""
+    text = []
+    for ch in raw.decode("utf-8", "surrogateescape"):
+        o = ord(ch)
+        if o < 0x20 or o == 0x7f or ch == "\\" or 0xdc80 <= o <= 0xdcff:
+            text.append("\\x%02x" % (o - 0xdc00 if o >= 0xdc80 else o))
+        else:
+            text.append(ch)
+    return "".join(text)
+
+
+def _list_files(root, skip, out, odd_names=None):
     """Writes the regular files under root that clamscan should read (it
     follows no symlinks below the folder it's given) to out, one path per
     line, and returns (listed, unscannable, unreadable). A path with a line
@@ -1140,17 +1156,126 @@ def _list_files(root, skip, out):
         for raw in files:
             if CONTROL.search(raw):
                 odd += 1
+                if odd_names is not None and len(odd_names) < 5:
+                    odd_names.append(odd_name(raw[:1024]))
             else:
                 out.write(raw + b"\n")
                 listed += 1
     return listed, odd, unreadable
 
 
+CLAM_LINE = 8192        # longest stdout or stderr line kept whole
+VANISH_KEEP = 5000      # vanished paths kept to check again (at most 20 MiB at PATH_MAX)
+
+
+def _read_line(stream):
+    """One line of at most CLAM_LINE bytes; the rest of a longer one is read
+    and dropped, so it can never be taken for a line of its own. b"" at
+    the end."""
+    line = stream.readline(CLAM_LINE)
+    if line and not line.endswith(b"\n"):
+        while True:
+            rest = stream.readline(CLAM_LINE)
+            if not rest or rest.endswith(b"\n"):
+                break
+        line += b"\n"
+    return line
+
+
+class ClamStderr:
+    """Reads clamscan's stderr in its own thread, so neither pipe can fill
+    and stall the other. What it says about each file it couldn't open:
+
+      <path>: No such file or directory
+      WARNING: <path>: Can't access file
+      WARNING: <path>: Not supported file type
+
+    A path is taken only from between "WARNING: " and the last ": " of the
+    line, and only if it is under the folder being scanned. "No such file
+    or directory" makes it a candidate for having vanished, to be checked
+    again once clamscan is done; any other reason means it wasn't scanned.
+    Everything else clamscan prints is counted, and the first few lines
+    kept, short, for the log. Nothing here is unbounded: lines are cut at
+    CLAM_LINE, at most VANISH_KEEP vanished paths and 5 of each other kind
+    are kept, the rest only counted."""
+
+    def __init__(self, stream, root):
+        self.stream, self.prefix = stream, os.fsencode(root.rstrip("/") + "/")
+        self.vanished, self.vanish_overflow = [], 0
+        self.not_scanned, self.not_scanned_items = 0, []
+        self.other_errors, self.said = 0, []
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        last = b""
+        for line in iter(lambda: _read_line(self.stream), b""):
+            line = line.rstrip(b"\n")
+            if line.startswith(b"WARNING: ") and b": " in line[9:]:
+                path, reason = line[9:].rsplit(b": ", 1)
+                if path.startswith(self.prefix):
+                    why = last[len(path) + 2:] if last.startswith(path + b": ") else b""
+                    if why == b"No such file or directory":
+                        if len(self.vanished) < VANISH_KEEP:
+                            self.vanished.append(path)
+                        else:
+                            self.vanish_overflow += 1
+                    else:
+                        self.skipped(path, (why or reason).decode("utf-8", "replace"))
+                    if last and not why:
+                        self._other(last)
+                    last = b""
+                    continue
+            # Held for one line: clamscan prints "<path>: <reason>" just
+            # before the WARNING for the same path.
+            if last:
+                self._other(last)
+            last = line
+        if last:
+            self._other(last)
+
+    def skipped(self, path, why):
+        self.not_scanned += 1
+        if len(self.not_scanned_items) < 5:
+            self.not_scanned_items.append("%s: %s" % (os.fsdecode(path)[:1024], why[:120]))
+
+    def _other(self, line):
+        text = line.decode("utf-8", "replace")
+        if text.startswith(("ERROR", "LibClamAV Error")):
+            self.other_errors += 1
+        if len(self.said) < 3:
+            self.said.append(text[:200])
+
+    def recheck(self):
+        """After clamscan exits: (vanished, in Downloads). A path that is
+        back (deleted and made again while the scan ran) or that can't be
+        checked was never scanned, and is counted as such."""
+        self.thread.join()
+        gone, downloads = 0, os.fsencode(os.path.join(HOME, "Downloads") + "/")
+        in_dl = 0
+        for path in self.vanished:
+            try:
+                os.lstat(path)
+                self.skipped(path, "came back after clamscan couldn't open it")
+            except FileNotFoundError:
+                gone += 1
+                in_dl += path.startswith(downloads)
+            except OSError as e:
+                self.skipped(path, "couldn't be checked again (%s)" % (e.strerror or "error"))
+        # Too many to check one by one: none of these count as gone.
+        if self.vanish_overflow:
+            self.not_scanned += self.vanish_overflow
+        return gone, in_dl
+
+
 def clam_scan(target):
     """Runs inside the background unit. Lists the files first, then runs
     clamscan --verbose over exactly that list and counts its "Scanning
     <file>" lines as it goes. Those lines are left out of the log, which
-    keeps only what --log would have: the files found and the summary."""
+    keeps only what --log would have: the files found and the summary.
+    clamscan's stderr is read too (ClamStderr), so the log can say which
+    files couldn't be scanned and why, and which ones were simply deleted
+    while the scan ran."""
     path = os.path.join(HOME, "Downloads") if target == "downloads" else HOME
     skip = [os.path.join(HOME, sub) for sub in CLAM_SKIP] if target == "home" else []
     started = int(time.time())
@@ -1162,35 +1287,55 @@ def clam_scan(target):
     log = keepwell_state.new_log(target)
     listfile = keepwell_state.new_filelist(target)
     lfd = os.open(listfile, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+    odd_names = []
     with os.fdopen(lfd, "wb") as lst:
-        total, odd, unreadable = _list_files(path, skip, lst)
+        total, odd, unreadable = _list_files(path, skip, lst, odd_names)
     _progress("clamscan", started, 0, total)
     argv = ["/usr/bin/clamscan", "--infected", "--verbose", "--file-list=" + listfile]
     fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
     with os.fdopen(fd, "wb", buffering=0) as out:
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, env={"PATH": "/usr/bin", "HOME": HOME, "LC_ALL": "C"})
+                                stderr=subprocess.PIPE, env={"PATH": "/usr/bin", "HOME": HOME, "LC_ALL": "C"})
+        err = ClamStderr(proc.stderr, path)
         done, said = 0, time.monotonic()
-        for line in proc.stdout:
+        for line in iter(lambda: _read_line(proc.stdout), b""):
             if line.startswith(b"Scanning "):
                 done += 1
                 if time.monotonic() - said >= 2:
                     _progress("clamscan", started, done, total)
                     said = time.monotonic()
                 continue
-            out.write(line[:4096])
+            out.write(line)
         rc = proc.wait()
+        vanished, vanished_dl = err.recheck()
         # Written after clamscan's summary, so keepwell_av.outcome reads them
         # with it: a scan with errors (an unreadable file makes clamscan exit
         # 2 after a normal summary), or one that never reached a folder, is
-        # never shown as clean.
+        # never shown as clean. Paths here come from the file list, which
+        # holds no control characters, so none can break a line.
         if odd:
             out.write(b"Keepwell: %d file(s) with control characters in their names were not scanned\n" % odd)
+            for name in odd_names:
+                out.write(b"Keepwell: unusual name, not scanned: %s\n" % name.encode("utf-8", "replace"))
         if unreadable:
             out.write(b"Keepwell: %d folder(s) or file(s) couldn't be read and were not scanned\n" % unreadable)
+        if vanished:
+            out.write(b"Keepwell: %d file(s) were deleted during the scan, %d of them in Downloads\n"
+                      % (vanished, vanished_dl))
+        if err.not_scanned:
+            out.write(b"Keepwell: %d file(s) couldn't be scanned\n" % err.not_scanned)
+            for item in err.not_scanned_items:
+                out.write(b"Keepwell: not scanned: %s\n" % CONTROL.sub(b"", item.encode("utf-8", "replace")))
+        if err.other_errors:
+            out.write(b"Keepwell: clamscan reported %d other error(s)\n" % err.other_errors)
+        for text in err.said:
+            out.write(b"Keepwell: clamscan said: %s\n" % CONTROL.sub(b"", text.encode("utf-8", "replace")))
         out.write(b"Keepwell: clamscan exit status %d\n" % rc)
-    # 0 nothing found, 1 something found; anything else is clamscan's error.
-    return 0 if rc in (0, 1) else rc
+    tail = keepwell_state.read(os.path.basename(log), sub="clamav", cap=64 * 1024) or b""
+    o = keepwell_av.outcome(tail.decode("utf-8", "replace"))
+    # 0 nothing found, 1 something found; 2 is clamscan's error, unless every
+    # file behind it was checked and is really gone.
+    return 0 if rc in (0, 1) or o["complete"] else rc
 
 
 def _scan_root(folder):

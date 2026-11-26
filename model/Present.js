@@ -286,6 +286,13 @@ function antivirus(p, now) {
   // checked nothing you can rely on, so it is never shown as fine either.
   var stopped = !p.scanning && last && !last.finished
   if (incomplete) facts.push(fact("Incomplete", incomplete))
+  if (incomplete) {
+    var gaps = (last.notScanned || []).concat(last.oddNames || [])
+    for (var g = 0; g < gaps.length && g < 5; g++) facts.push(fact(g === 0 ? "Not scanned" : "", gaps[g]))
+    if (!gaps.length && last.clamSaid) facts.push(fact("ClamAV said", last.clamSaid))
+  }
+  if (!p.scanning && last && last.finished && last.vanished)
+    facts.push(fact("Deleted while scanning", plural(last.vanished, "file", "files"), "nothing left to scan"))
   var found = last && last.finished && last.infected ? last.found || [] : []
   for (var i = 0; i < found.length; i++) facts.push(fact(i === 0 ? "Found" : "", found[i]))
   if (p.allowed) facts.push(fact("Not a threat", plural(p.allowed, "file", "files")

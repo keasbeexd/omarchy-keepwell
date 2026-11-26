@@ -36,41 +36,87 @@ def summary(log):
 
 STATUS = re.compile(r"(?m)^Keepwell: clamscan exit status (-?\d+)$")
 ERRORS = re.compile(r"(?m)^Total errors: (\d+)$")
+SCANNED = re.compile(r"(?m)^Scanned files: (\d+)$")
 UNLISTED = re.compile(r"(?m)^Keepwell: (\d+) file\(s\) with control characters in their names were not scanned$")
 UNREAD = re.compile(r"(?m)^Keepwell: (\d+) folder\(s\) or file\(s\) couldn't be read and were not scanned$")
+VANISHED = re.compile(r"(?m)^Keepwell: (\d+) file\(s\) were deleted during the scan, (\d+) of them in Downloads$")
+NOTSCANNED = re.compile(r"(?m)^Keepwell: (\d+) file\(s\) couldn't be scanned$")
+OTHER = re.compile(r"(?m)^Keepwell: clamscan reported (\d+) other error\(s\)$")
+NOTSCANNED_ITEM = re.compile(r"(?m)^Keepwell: not scanned: (/.+)$")
+ODD_ITEM = re.compile(r"(?m)^Keepwell: unusual name, not scanned: (/.+)$")
+SAID_ITEM = re.compile(r"(?m)^Keepwell: clamscan said: (.+)$")
+
+
+def vanish_limit(scanned):
+    """How many files may disappear during a scan before that alone makes it
+    incomplete: 1% of the files scanned, and at least 100. A home folder
+    always has some churn (browser profiles, editor swap files); far more
+    than that is not ordinary."""
+    return max(100, (scanned or 0) // 100)
 
 
 def outcome(log):
     """How a scan log ended: {finished, complete, rc, errors, unscanned,
-    unreadable}. finished: clamscan printed its final summary. complete: it
-    also exited 0 or 1 with no errors, and listing the folder reached every
-    file in it. Anything else (a file clamscan couldn't read, a folder
-    Keepwell couldn't list, an exit status of 2, a log from before Keepwell
-    recorded the status) is never reported as a clean scan. Only lines
-    after the last summary count: clamscan's own, then the ones Keepwell
-    writes after it exits. Paths in the log are absolute, so no file name
-    can start one of these lines."""
+    unreadable, vanished, vanishedDownloads, notScanned, otherErrors, ...}.
+    finished: clamscan printed its final summary. complete: it also exited
+    0 or 1 with no errors, listing the folder reached every file in it, and
+    every file it couldn't open was checked afterwards and is really gone.
+
+    A file deleted between Keepwell listing it and clamscan reaching it makes
+    clamscan exit 2 with no error count, though there is nothing left to
+    scan. Keepwell checks each one again after the scan and writes how many
+    are really gone; only then does exit 2 count, and only when no other
+    error was reported, fewer than vanish_limit() files vanished and none of
+    them was in Downloads, where files don't normally come and go. Anything
+    else (a file clamscan couldn't read, a folder Keepwell couldn't list, an
+    unexplained exit 2, a log from before Keepwell recorded the status) is
+    never reported as a clean scan. Only lines after the last summary
+    count: clamscan's own, then the ones Keepwell writes after it exits.
+    Paths in the log are absolute, so no file name can start one of these
+    lines."""
     tail = summary(log)
-    rc, errors = STATUS.search(tail), ERRORS.search(tail)
-    odd, unread = UNLISTED.search(tail), UNREAD.search(tail)
+
+    def num(rx, group=1):
+        m = rx.search(tail)
+        return int(m.group(group)) if m else 0
+
+    rc = STATUS.search(tail)
     out = {"finished": bool(tail), "rc": int(rc.group(1)) if rc else None,
-           "errors": int(errors.group(1)) if errors else 0,
-           "unscanned": int(odd.group(1)) if odd else 0,
-           "unreadable": int(unread.group(1)) if unread else 0}
-    out["complete"] = (out["finished"] and out["rc"] in (0, 1) and not out["errors"]
-                       and not out["unscanned"] and not out["unreadable"])
+           "errors": num(ERRORS), "unscanned": num(UNLISTED), "unreadable": num(UNREAD),
+           "vanished": num(VANISHED), "vanishedDownloads": num(VANISHED, 2),
+           "notScanned": num(NOTSCANNED), "otherErrors": num(OTHER),
+           "scanned": num(SCANNED),
+           "notScannedItems": NOTSCANNED_ITEM.findall(tail)[:5],
+           "oddItems": ODD_ITEM.findall(tail)[:5],
+           "said": SAID_ITEM.findall(tail)[:3]}
+    out["tooManyVanished"] = out["vanished"] > vanish_limit(out["scanned"])
+    explained = out["rc"] == 2 and out["vanished"] > 0 and not out["otherErrors"]
+    out["complete"] = (out["finished"] and (out["rc"] in (0, 1) or explained)
+                       and not out["errors"] and not out["unscanned"] and not out["unreadable"]
+                       and not out["notScanned"] and not out["vanishedDownloads"]
+                       and not out["tooManyVanished"])
     return out
+
+
+def _n(count, one, many):
+    return "%d %s" % (count, one if count == 1 else many)
 
 
 def incomplete_text(o):
     """Why a finished scan doesn't count as complete, in a few words."""
     why = []
     if o["errors"]:
-        why.append("%d file%s couldn't be read" % (o["errors"], "" if o["errors"] == 1 else "s"))
+        why.append(_n(o["errors"], "file", "files") + " couldn't be read")
+    if o.get("notScanned"):
+        why.append(_n(o["notScanned"], "file", "files") + " couldn't be scanned")
     if o["unreadable"]:
-        why.append("%d folder%s couldn't be listed" % (o["unreadable"], "" if o["unreadable"] == 1 else "s"))
+        why.append(_n(o["unreadable"], "folder", "folders") + " couldn't be listed")
     if o["unscanned"]:
-        why.append("%d file%s with unusual names skipped" % (o["unscanned"], "" if o["unscanned"] == 1 else "s"))
+        why.append(_n(o["unscanned"], "file", "files") + " with unusual names skipped")
+    if o.get("vanishedDownloads"):
+        why.append(_n(o["vanishedDownloads"], "file", "files") + " in Downloads deleted or renamed during the scan")
+    if o.get("tooManyVanished"):
+        why.append(_n(o["vanished"], "file", "files") + " deleted during the scan, more than usual")
     if not why:
         why.append("ClamAV stopped with an error" if o["rc"] is not None else "ClamAV's exit status wasn't recorded")
     return ", ".join(why)
