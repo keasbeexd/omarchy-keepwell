@@ -215,7 +215,7 @@ at 0600, written through a fresh temporary file and a rename.
 | `audit.json` | the last arch-audit result you asked for: package names, severities, fix versions |
 | `osv.json` | the last dependency scan: for each vulnerable library, the project and lockfile, the package and version, its vulnerability ids, CVEs, severities, one-line summaries and fixed versions |
 | `gitleaks.json` | the last secrets scan: the folder, how many repositories, and for each finding only the repository, file, line, rule name and commit — never the secret |
-| `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files, clamscan's summary and its exit status |
+| `clamav/*.log` | ClamAV's scan logs, the newest ten; they list the paths of any infected files, clamscan's summary, the paths of up to five files that weren't scanned and up to five names with control characters, how many files were deleted during the scan, up to three other messages from clamscan, and its exit status |
 | `clamav/filelist-*.txt` | the paths of the files the last scan of that folder handed to clamscan; replaced by the next scan |
 | `claims.json` | the names the unclaimed finder treats as in use, rebuilt when pacman changes something |
 | `unclaimed.json` | the age you chose for unclaimed folders, and the folders you told it to ignore |
@@ -343,16 +343,38 @@ the end, are left out and counted), then runs
 `/usr/bin/clamscan --infected --verbose --file-list=<list>` and counts its
 `Scanning <file>` lines. Every two seconds it writes how far it has got to
 `progress-clamscan.json`, which the window shows as a bar with an estimate of
-the time left. The per-file lines are not kept: the log holds only the files
-found, clamscan's summary, and the lines Keepwell adds after it: how many
-files and folders were left out, and clamscan's exit status. A scan only
-counts as clean when clamscan exited 0 or 1, its summary reports no errors
-and nothing was left out. A folder that couldn't be listed (its files never
-reach clamscan), a file clamscan couldn't read (it then exits 2 after a
-normal summary), an error exit or a missing status shows the scan as incomplete
-in the check, the notification and the deep-scan summary, never as
-"nothing found". The secrets and dependency scans report progress the same
-way, one repository at a time.
+the time left. clamscan's error output is read too, one line at a time (each
+cut at 8 KiB), for the files it couldn't open and why. The per-file lines
+are not kept: the log holds only the files found, clamscan's summary, and
+the lines Keepwell adds after it: how many files and folders were left out,
+the first five files that weren't scanned (with clamscan's reason) and the
+first five names with control characters (written with `\xNN` escapes),
+how many files were deleted while the scan ran, the first three other
+messages from clamscan, and clamscan's exit status.
+
+A home scan takes a long time, and files come and go while it runs (browser
+profiles, editor swap files). A file deleted between Keepwell listing it
+and clamscan reaching it has nothing left to scan, but clamscan still exits
+2. So Keepwell checks every file clamscan reported as "No such file or
+directory" again once clamscan is done: one that is really gone is counted
+as deleted; one that is back (deleted and made again) or can't be checked
+counts as not scanned. Exit status 2 counts as complete only when every
+file behind it is really gone, clamscan reported no other error, none of
+them was in `~/Downloads`, and no more vanished than 1% of the files scanned
+(at least 100).
+
+A scan only counts as clean when clamscan exited 0 or 1 (or 2 for deleted
+files, as above), its summary reports no errors and nothing was left out. A
+folder that couldn't be listed (its files never reach clamscan), a file
+clamscan couldn't read or open (an unreadable file makes it exit 2 after a
+normal summary), a file swapped for something it can't scan, a file in
+Downloads deleted or renamed during the scan, an unexplained error exit or a
+missing status shows the scan as incomplete in the check, the notification
+and the deep-scan summary, never as "nothing found"; the check names the
+files that weren't scanned. A file clamscan couldn't read is only counted
+(clamscan doesn't say which one). The check also says how many files were
+deleted while a scan ran. The secrets and dependency scans report progress
+the same way, one repository at a time.
 
 `--since` is the time the scan was started. The notification only reports a
 result made after it: the scan's own log, which is created before anything
@@ -361,9 +383,13 @@ fails before it writes its result (for example, the file list can't be
 written on a full disk) says it failed or stopped, and an earlier scan's
 result is never announced as this one's.
 
-- **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~` but
-  skips `~/.cache`, `~/.local/share/Trash` and Keepwell's own logs. A home
-  scan can take half an hour or more.
+- **Scan Downloads** scans `~/Downloads`; **Scan home folder** scans `~`,
+  `~/.cache` included (tools such as mise and yay keep downloaded programs
+  and build sources there), but skips `~/.local/share/Trash` and Keepwell's
+  own logs. Nothing in the Trash runs unless it is restored, and a restored
+  file is scanned by the next scan; files you move to the Trash from
+  **Review found files…** would otherwise be flagged again. A home scan can
+  take an hour or more.
 - **Review found files…** lists what the last scan flagged. Tick a file to
   move it to the Trash, or mark it **Not a threat**: games and Wine ship
   Windows DLLs that sometimes match ClamAV's Windows signatures (DXVK is a

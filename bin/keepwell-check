@@ -433,6 +433,14 @@ def _last_scan():
     out["complete"] = o["complete"]
     if out["finished"] and not o["complete"]:
         out["incomplete"] = clean(keepwell_av.incomplete_text(o), 120)
+    if out["finished"]:
+        # What wasn't scanned, by name, so it can be dealt with; and files
+        # deleted while the scan ran, which had nothing left to scan.
+        out["vanished"] = o["vanished"]
+        out["notScanned"] = [clean(i.replace(HOME, "~", 1), 160) for i in o["notScannedItems"]]
+        out["oddNames"] = [clean(i.replace(HOME, "~", 1), 160) for i in o["oddItems"]]
+        if not o["complete"] and o["said"] and o["rc"] not in (0, 1):
+            out["clamSaid"] = clean(o["said"][0], 160)
     shown, hidden = keepwell_av.split(keepwell_av.findings(log))
     out["found"] =[clean(path.replace(HOME, "~", 1), 160) for path, _ in shown][:20]
     out["allowedFound"] = len(hidden)
